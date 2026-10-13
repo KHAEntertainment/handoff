@@ -1,0 +1,24 @@
+{
+  "name": "handoff",
+  "version": "0.1.0",
+  "description": "Asks the agent for a resume handoff before the context is compacted, compacts, then points it back at the handoff.",
+  "author": { "name": "KHA Entertainment" },
+  "homepage": "https://github.com/KHAEntertainment/handoff",
+  "repository": "https://github.com/KHAEntertainment/handoff",
+  "license": "MIT",
+  "keywords": ["compaction", "handoff", "context", "hooks"],
+  "userConfig": {
+    "thresholdPercent": {
+      "type": "number",
+      "title": "Handoff threshold (%)",
+      "description": "How full the context window gets before the agent is asked to write a handoff.",
+      "default": 80
+    },
+    "autoCompact": {
+      "type": "boolean",
+      "title": "Compact and resume automatically",
+      "description": "Once the handoff is written and the turn ends, compact and send a resume prompt. Off: the agent tells you and you compact.",
+      "default": true
+    }
+  }
+}
