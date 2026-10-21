@@ -2,6 +2,7 @@
 // At THRESHOLD% of the compaction window the agent is asked for a resume handoff; once it is written and
 // the turn ends, the session is compacted and told to resume from it.
 import { stat, mkdir } from 'node:fs/promises'
+import { resolve } from 'node:path'
 
 const THRESHOLD = Number(process.env.CONTEXT_HANDOFF_THRESHOLD ?? 80)
 // The window a session may fill before compacting, as Claude Code's autoCompactWindow: 600k unless smaller.
@@ -183,7 +184,7 @@ export const ContextHandoff = async ({ client }) => {
   // those permission asks with a rule that overrides user config, and nobody is there to approve, so the
   // plugin approves them itself. Narrow on purpose: only for a session this plugin is tracking, only for the
   // exact handoff file it assigned to that session (or that file's folder, as `external_directory` asks
-  // for), and never when any path in the ask is relative, unresolved or points elsewhere. (OpenCode 1.18
+  // for), and never when any path in the ask is unresolved or points elsewhere (relative paths are resolved against the session's own directory). (OpenCode 1.18
   // does not call the `permission.ask` plugin hook; it does emit `permission.asked`, so the reply goes
   // through the client.)
   const approveHandoffAsk = async ask => {
@@ -193,14 +194,18 @@ export const ContextHandoff = async ({ client }) => {
     if (st === undefined || st.isChild || st.handoff === '') return
     const file = st.handoff
     const folder = file.slice(0, file.lastIndexOf('/'))
-    const paths = [ask.metadata?.filepath, ask.metadata?.parentDir, ...[].concat(ask.patterns ?? ask.pattern ?? [])]
-    if (paths.length === 0) return
-    const allowed = path =>
-      typeof path === 'string' &&
-      path.startsWith('/') &&
-      !path.split('/').includes('..') &&
-      (path === file || path === folder || path === `${folder}/*`)
-    if (!paths.every(path => path === undefined || allowed(path))) return
+    // An `edit` ask names its target relative to the session's directory; resolve it there, never guess.
+    const toAbsolute = async path => {
+      if (typeof path !== 'string') return undefined
+      if (path.startsWith('/')) return resolve(path)
+      st.directory ??= await client.session.get({ path: { id: ask.sessionID } }).then(r => r?.data?.directory, () => undefined)
+      return typeof st.directory === 'string' && st.directory.startsWith('/') ? resolve(st.directory, path) : undefined
+    }
+    const asked = [ask.metadata?.filepath, ask.metadata?.parentDir, ...[].concat(ask.patterns ?? ask.pattern ?? [])].filter(path => path !== undefined)
+    if (asked.length === 0) return
+    const paths = await Promise.all(asked.map(toAbsolute))
+    const allowed = path => path === file || path === folder || path === `${folder}/*`
+    if (!paths.every(path => path !== undefined && allowed(path))) return
     if (!paths.some(path => path === file)) return
     const result = await client.postSessionIdPermissionsPermissionId({ path: { id: ask.sessionID, permissionID: ask.id }, body: { response: 'once' } })
       .then(r => (r?.error ? JSON.stringify(r.error) : undefined), error => String(error))
