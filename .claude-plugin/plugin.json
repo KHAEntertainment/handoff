@@ -1,6 +1,6 @@
 {
   "name": "handoff",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Asks the agent for a resume handoff before the context is compacted, compacts, then points it back at the handoff.",
   "author": { "name": "KHA Entertainment" },
   "homepage": "https://github.com/KHAEntertainment/handoff",
