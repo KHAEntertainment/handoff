@@ -376,8 +376,10 @@ export const register: Register = (on, options) => {
   // user plugins, so this is where the command is held; session.compact below covers the rest where it still fires.
   on('command.run', { command: 'compact' }, async ($, e, next) => {
     const typed = e.args.trim()
-    const seen = { trigger: `command:${e.origin.kind}`, instructions: e.args }
-    if (e.origin.kind === 'plugin' && typed.includes(OWN_COMPACT)) {
+    // A build that leaves origin out fails open: the command is treated as from an unknown source.
+    const origin: string | undefined = e.origin?.kind
+    const seen = { trigger: `command:${origin ?? 'unknown'}`, instructions: e.args }
+    if (origin === 'plugin' && typed.includes(OWN_COMPACT)) {
       // This mod's own headless fallback, maybe queued until now: the one place it is cleared on success.
       await logCompact($, seen, 'own')
       isOwnPending = false
@@ -401,7 +403,7 @@ export const register: Register = (on, options) => {
       return { text: IGNORED }
     }
     await logCompact($, seen, 'asked for a handoff')
-    await askFirst($, leadFor(typed, e.origin.kind === 'composer'))
+    await askFirst($, leadFor(typed, origin === 'composer'))
     return { text: held() }
   })
 

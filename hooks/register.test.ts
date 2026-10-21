@@ -669,3 +669,12 @@ test('with autoCompact off, a held /compact tells the user to type it again', { 
   await clock.advance(600)
   expect(s.prompts[0]).toMatch(/tell the user it is ready so they can compact, then wait/)
 })
+
+test('a /compact from a build that leaves out origin is held, without saying the user typed it', async ($, on) => {
+  const { clock, s } = typedSession($, on)
+  const held = await $.command.run({ command: 'compact', args: '', presentation: person.presentation } as any)
+  expect(held.text).toMatch(/Compaction postponed/)
+  expect(s.ran).toHaveLength(0)
+  await clock.advance(600)
+  expect(s.prompts[0]).toMatch(/cannot tell whether the user typed it/)
+})
