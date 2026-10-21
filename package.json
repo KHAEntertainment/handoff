@@ -1,6 +1,6 @@
 {
   "name": "handoff",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Claude Code plugin: write a resume handoff before compaction, compact, then resume from it.",
   "license": "MIT",
