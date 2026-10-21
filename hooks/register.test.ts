@@ -678,3 +678,13 @@ test('a /compact from a build that leaves out origin is held, without saying the
   await clock.advance(600)
   expect(s.prompts[0]).toMatch(/cannot tell whether the user typed it/)
 })
+
+// The other half, a marker with no origin while the mod's headless fallback is pending, needs $.session.compact to
+// reject as headless, which the mocks cannot do: the bottom hook's error names its event.
+test('a marker with no origin is not the mod\'s own while no fallback of its is pending', async ($, on) => {
+  const { s } = typedSession($, on)
+  const args = 'A resume handoff was just written to /h/.claude/handoffs/sess-1.md. Keep that path in the summary.'
+  const held = await $.command.run({ command: 'compact', args, presentation: person.presentation } as any)
+  expect(held.text).toMatch(/Compaction postponed/)
+  expect(s.ran).toHaveLength(0)
+})

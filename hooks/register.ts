@@ -379,7 +379,9 @@ export const register: Register = (on, options) => {
     // A build that leaves origin out fails open: the command is treated as from an unknown source.
     const origin: string | undefined = e.origin?.kind
     const seen = { trigger: `command:${origin ?? 'unknown'}`, instructions: e.args }
-    if (origin === 'plugin' && typed.includes(OWN_COMPACT)) {
+    // Without an origin, the marker is the mod's own only while its headless fallback is pending.
+    const isOwn = origin === 'plugin' || (origin === undefined && isOwnPending)
+    if (isOwn && typed.includes(OWN_COMPACT)) {
       // This mod's own headless fallback, maybe queued until now: the one place it is cleared on success.
       await logCompact($, seen, 'own')
       isOwnPending = false
