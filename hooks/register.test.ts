@@ -299,17 +299,18 @@ test('a bare /compact long after a compaction still asks for a handoff', async (
   const { clock, prompts } = await afterCompaction($, on)
   await clock.advance(16 * 60 * 1000)
   const typed = await $.session.compact({ trigger: 'manual', messages: work })
-  expect(typed.skip).toMatch(/asking for a handoff first/)
+  expect(typed.skip).toMatch(/Compaction postponed until the handoff is written/)
   await clock.advance(600)
   expect(prompts.some(p => /A \/compact command arrived/.test(p))).toBe(true)
 })
 
-test('a /compact with instructions right after a compaction is treated as the user\'s', async ($, on) => {
+test('a /compact with instructions right after a compaction asks for a handoff, without saying the user typed it', async ($, on) => {
   const { clock, prompts } = await afterCompaction($, on)
   const typed = await $.session.compact({ trigger: 'manual', instructions: 'keep the API notes', messages: work })
-  expect(typed.skip).toMatch(/asking for a handoff first/)
+  expect(typed.skip).toMatch(/Compaction postponed until the handoff is written/)
   await clock.advance(600)
-  expect(prompts.some(p => /The user asked to compact this session, with these instructions/.test(p))).toBe(true)
+  expect(prompts.some(p => /A \/compact command arrived for this session, with these instructions for it: "keep the API notes"\. The mod cannot tell/.test(p))).toBe(true)
+  expect(prompts.some(p => /The user asked/.test(p))).toBe(false)
 })
 
 test('/compact now still compacts right after a compaction', async ($, on) => {
@@ -379,4 +380,292 @@ test('the mod\'s own resume prompt carries the ADHD reminder, once', async ($, o
   expect(prompts).toHaveLength(1)
   expect(prompts[0]).toMatch(/Read your handoff at/)
   expect(prompts[0]).toMatch(/ADHD mode is active/)
+})
+
+// A typed /compact arrives as command.run. Since Claude Code 2.1.301 that is the only event the mod sees for it:
+// the built-in cc-plugin-sec-default hands session.compact past user plugins.
+const person = { origin: { kind: 'composer' as const }, presentation: { isFullscreen: false, columns: 80 } }
+const sdk = { ...person, origin: { kind: 'sdk' as const } }
+const toolWork = [
+  { role: 'user' as const, text: 'go', toolUses: [] },
+  {
+    role: 'assistant' as const,
+    text: '',
+    toolUses: [
+      { tool_use_id: 'a', tool: 'Edit', input: { file_path: '/repo/src/a.ts' } },
+      { tool_use_id: 'b', tool: 'Bash', input: { command: 'npm test' } },
+    ],
+  },
+]
+
+// The engine's /compact, as the real one runs it: through session.compact (or past it, as the built-in
+// cc-plugin-sec-default makes it in interactive sessions), reporting "Compacted · ..." or "Not compacted · ...".
+type TypedOptions = {
+  tokens?: number
+  isOnDisk?: boolean
+  isAdhd?: boolean
+  isRefused?: boolean
+  isBypassed?: boolean
+  isSkippedBelow?: boolean
+  coreContext?: string[]
+  coreText?: string
+  isUnreadable?: boolean
+}
+const typedSession = ($: any, on: On, opts: TypedOptions = {}) => {
+  mock.env(on, { HOME: '/h' })
+  const clock = mock.clock(on, { now: 5000 })
+  const s = { tokens: opts.tokens ?? 300_000, isOnDisk: opts.isOnDisk ?? false, ran: [] as string[], inner: [] as any[], prompts: [] as string[], messages: toolWork as any[] }
+  on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: s.tokens, window: 1_000_000, percent: Math.round(s.tokens / 10_000) }, rateLimits: [] } }))
+  bash(on)
+  on('ui.log', () => ({ value: undefined }))
+  on('turn.complete', () => ({ text: '' }))
+  const file = { value: { kind: 'file' as const, size: 4000, mtimeMs: 6000, isLink: false } }
+  on('fs.stat', (_, e) => (e.path.endsWith('.i-have-adhd-always') ? (opts.isAdhd ? file : { deny: 'ENOENT' }) : s.isOnDisk ? file : { deny: 'ENOENT' }))
+  on('session.messages', () => (opts.isUnreadable ? { deny: 'unreadable' } : { value: s.messages }))
+  on('session.compact', () => (opts.isSkippedBelow ? { skip: 'a PreCompact hook blocked it' } : { messages: [summary] }))
+  const compacted = () => ({ text: opts.coreText ?? 'Compacted · 1,000 → 100 tokens', ...(opts.coreContext === undefined ? {} : { context: opts.coreContext }) })
+  on('command.run', { command: 'compact' }, async (_, e) => {
+    s.ran.push(e.args)
+    if (opts.isRefused) return { text: 'Not compacted · not enough messages to compact' }
+    if (opts.isBypassed) {
+      // No session.compact reaches the mod, and the summary is as many rows as before.
+      s.messages = [summary, { role: 'user' as const, text: 'kept', toolUses: [] }]
+      return compacted()
+    }
+    const inner = await $.session.compact({ trigger: 'manual', instructions: e.args === '' ? undefined : e.args, messages: s.messages })
+    s.inner.push(inner)
+    if (inner.skip !== undefined) return { text: `Not compacted · ${inner.skip}` }
+    s.messages = inner.messages
+    return compacted()
+  })
+  on('prompt.submit', (_, e) => {
+    s.prompts.push(e.text)
+    return { text: e.text }
+  })
+  return { clock, s }
+}
+
+test('a /compact typed at the prompt with no handoff is postponed, asked for, then compacted', async ($, on) => {
+  const { clock, s } = typedSession($, on)
+  const held = await $.command.run({ command: 'compact', args: '', ...person })
+  expect(held.text).toMatch(/Compaction postponed until the handoff is written/)
+  expect(held.text).toMatch(/\/compact now/)
+  expect(s.ran).toHaveLength(0)
+  await clock.advance(600)
+  expect(s.prompts[0]).toMatch(/The user asked to compact this session\./)
+  expect(/cannot tell/.test(s.prompts[0] ?? '')).toBe(false)
+  expect(s.prompts[0]).toMatch(/\/h\/\.claude\/handoffs\/sess-1\.md/)
+
+  s.isOnDisk = true
+  await $.turn.complete({ answer: 'Handoff written.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(800)
+  expect(s.prompts[1]).toMatch(/Read your handoff/)
+})
+
+test('a bare /compact from the SDK is postponed too, without saying the user typed it', async ($, on) => {
+  const { clock, s } = typedSession($, on)
+  const held = await $.command.run({ command: 'compact', args: '', ...sdk })
+  expect(held.text).toMatch(/postponed/)
+  expect(s.ran).toHaveLength(0)
+  await clock.advance(600)
+  expect(s.prompts[0]).toMatch(/A \/compact command arrived for this session\./)
+  expect(s.prompts[0]).toMatch(/cannot tell whether the user typed it/)
+  expect(s.prompts[0]).toMatch(/looks spurious/)
+})
+
+test('a typed /compact with instructions is postponed and the instructions passed on as the user\'s', async ($, on) => {
+  const { clock, s } = typedSession($, on)
+  const held = await $.command.run({ command: 'compact', args: 'keep the API notes', ...person })
+  expect(held.text).toMatch(/postponed/)
+  expect(s.ran).toHaveLength(0)
+  await clock.advance(600)
+  expect(s.prompts[0]).toMatch(/The user asked to compact this session, with these instructions for it: "keep the API notes"/)
+})
+
+test('a /compact with instructions from the SDK passes them on, hedged', async ($, on) => {
+  const { clock, s } = typedSession($, on)
+  await $.command.run({ command: 'compact', args: 'keep the API notes', ...sdk })
+  await clock.advance(600)
+  expect(s.prompts[0]).toMatch(/A \/compact command arrived for this session, with these instructions for it: "keep the API notes"\. The mod cannot tell/)
+  expect(/looks spurious/.test(s.prompts[0] ?? '')).toBe(false)
+})
+
+test('a typed /compact now compacts once, with what follows "now" as the instructions and a record of the tool work', async ($, on) => {
+  const { s } = typedSession($, on)
+  const done = await $.command.run({ command: 'compact', args: 'now keep the API notes', ...person })
+  expect(s.ran).toEqual(['keep the API notes'])
+  // session.compact fires inside the command: it must not decide the same compaction again.
+  expect(s.inner[0]?.skip).toBeUndefined()
+  expect(s.inner[0]?.messages).toEqual([summary])
+  expect(done.text).toMatch(/^Compacted/)
+  expect(done.context).toHaveLength(1)
+  expect(done.context?.[0]).toMatch(/before a handoff was written/)
+  expect(done.context?.[0]).toMatch(/\/repo\/src\/a\.ts/)
+  expect(done.context?.[0]).toMatch(/npm test/)
+})
+
+test('a bare typed /compact now passes no instructions', async ($, on) => {
+  const { s } = typedSession($, on)
+  await $.command.run({ command: 'compact', args: 'now', ...person })
+  expect(s.ran).toEqual([''])
+})
+
+test('a typed /compact with the handoff on disk compacts and points at it', async ($, on) => {
+  const { s } = typedSession($, on, { tokens: 850_000, isOnDisk: true })
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  const done = await $.command.run({ command: 'compact', args: '', ...person })
+  expect(s.ran).toEqual([''])
+  expect(s.inner[0]?.skip).toBeUndefined()
+  expect(done.context?.[0]).toMatch(/resume handoff is at \/h\/\.claude\/handoffs\//)
+})
+
+// A typed compaction with the handoff on disk, then the fill drops to 6%: the setup for a stray /compact.
+const afterTyped = async ($: any, on: On) => {
+  const session = typedSession($, on, { tokens: 850_000, isOnDisk: true })
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  await $.command.run({ command: 'compact', args: '', ...person })
+  session.s.tokens = 60_000
+  session.s.isOnDisk = false
+  return session
+}
+
+test('a bare typed /compact right after a compaction, with the context nearly empty, is ignored', async ($, on) => {
+  const { clock, s } = await afterTyped($, on)
+  const stray = await $.command.run({ command: 'compact', args: '', ...person })
+  expect(stray.text).toMatch(/Ignored a \/compact right after a compaction/)
+  expect(s.ran).toHaveLength(1)
+  await clock.advance(600)
+  expect(s.prompts).toHaveLength(0)
+})
+
+test('a bare typed /compact long after a compaction is postponed again', async ($, on) => {
+  const { clock, s } = await afterTyped($, on)
+  await clock.advance(16 * 60 * 1000)
+  const typed = await $.command.run({ command: 'compact', args: '', ...person })
+  expect(typed.text).toMatch(/postponed/)
+  expect(s.ran).toHaveLength(1)
+})
+
+test('right after a compaction, a typed /compact with instructions is postponed and /compact now compacts', async ($, on) => {
+  const { s } = await afterTyped($, on)
+  const typed = await $.command.run({ command: 'compact', args: 'keep the API notes', ...person })
+  expect(typed.text).toMatch(/postponed/)
+  await $.command.run({ command: 'compact', args: 'now', ...person })
+  expect(s.ran).toHaveLength(2)
+})
+
+// What compactAndResume sends through the command in a headless seat (the mocks cannot make $.session.compact
+// reject, so the fallback itself is checked in a real session).
+test('the mod\'s own /compact, as its headless fallback sends it, goes straight through', async ($, on) => {
+  const { s } = typedSession($, on, { tokens: 850_000, isOnDisk: true })
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  const args = 'A resume handoff was just written to /h/.claude/handoffs/sess-1.md. Keep that path in the summary.'
+  const done = await $.command.run({ command: 'compact', args, ...person, origin: { kind: 'plugin' as const, name: 'handoff' } })
+  expect(s.ran).toEqual([args])
+  expect(s.inner[0]?.skip).toBeUndefined()
+  expect(s.inner[0]?.messages).toEqual([summary])
+  expect(done.context).toBeUndefined()
+})
+
+test('a typed /compact now that does not compact leaves no note', async ($, on) => {
+  const { s } = typedSession($, on, { isRefused: true })
+  const done = await $.command.run({ command: 'compact', args: 'now', ...person })
+  expect(s.ran).toEqual([''])
+  expect(done.context).toBeUndefined()
+})
+
+test('a typed /compact now sends the ADHD reminder as its own prompt', async ($, on) => {
+  const { clock, s } = typedSession($, on, { isAdhd: true })
+  await $.command.run({ command: 'compact', args: 'now', ...person })
+  await clock.advance(800)
+  expect(s.prompts).toHaveLength(1)
+  expect(s.prompts[0]).toMatch(/ADHD mode is active/)
+})
+
+test('a typed /compact now with the handoff on disk still points at it, and says what it does not cover', async ($, on) => {
+  const { s } = typedSession($, on, { tokens: 850_000, isOnDisk: true })
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  await $.tool.call({ tool: 'Bash', command: 'npm test' })
+  const done = await $.command.run({ command: 'compact', args: 'now', ...person })
+  expect(s.ran).toEqual([''])
+  expect(done.context?.[0]).toMatch(/resume handoff is at \/h\/\.claude\/handoffs\//)
+  expect(done.context?.[0]).toMatch(/predates your last 1 tool calls/)
+})
+
+test('a compaction past session.compact, with as many rows as before, still leaves the note and arms the stray guard', async ($, on) => {
+  const { s } = typedSession($, on, { isBypassed: true })
+  const done = await $.command.run({ command: 'compact', args: 'now', ...person })
+  expect(done.context?.[0]).toMatch(/before a handoff was written/)
+  s.tokens = 60_000
+  const stray = await $.command.run({ command: 'compact', args: '', ...person })
+  expect(stray.text).toMatch(/Ignored a \/compact right after a compaction/)
+})
+
+test('a typed /compact now that a hook further down skips leaves no note', async ($, on) => {
+  const { s } = typedSession($, on, { isSkippedBelow: true })
+  const done = await $.command.run({ command: 'compact', args: 'now', ...person })
+  expect(s.inner[0]?.skip).toMatch(/PreCompact/)
+  expect(done.text).toMatch(/^Not compacted/)
+  expect(done.context).toBeUndefined()
+})
+
+test('the command\'s own context is kept ahead of the note', async ($, on) => {
+  typedSession($, on, { coreContext: ['core note'] })
+  const done = await $.command.run({ command: 'compact', args: 'now', ...person })
+  expect(done.context).toHaveLength(2)
+  expect(done.context?.[0]).toBe('core note')
+  expect(done.context?.[1]).toMatch(/before a handoff was written/)
+})
+
+test('after the mod\'s own /compact, a typed one is the person\'s again, and the marker typed by hand is not the mod\'s', async ($, on) => {
+  const { s } = typedSession($, on)
+  const args = 'A resume handoff was just written to /h/.claude/handoffs/sess-1.md. Keep that path in the summary.'
+  await $.command.run({ command: 'compact', args, ...person, origin: { kind: 'plugin' as const, name: 'handoff' } })
+  expect(s.ran).toHaveLength(1)
+  const typed = await $.command.run({ command: 'compact', args: '', ...person })
+  expect(typed.text).toMatch(/postponed/)
+  const forged = await $.command.run({ command: 'compact', args, ...person })
+  expect(forged.text).toMatch(/postponed/)
+  expect(s.ran).toHaveLength(1)
+})
+
+test('a subagent\'s or a precompute compaction passes through untouched', async ($, on) => {
+  const { clock, s } = typedSession($, on, { tokens: 850_000 })
+  const pre = await $.session.compact({ trigger: 'precompute', messages: work })
+  expect(pre.messages).toEqual([summary])
+  const sub = await $.session.compact({ trigger: 'manual', agentId: 'sub-1', messages: work })
+  expect(sub.messages).toEqual([summary])
+  await clock.advance(800)
+  expect(s.prompts).toHaveLength(0)
+})
+
+test('a routed compaction counts by session.compact\'s result alone, and the next refused one does not', async ($, on) => {
+  const opts: TypedOptions = { coreText: '' }
+  const { s } = typedSession($, on, opts)
+  const done = await $.command.run({ command: 'compact', args: 'now', ...person })
+  expect(done.context?.[0]).toMatch(/before a handoff was written/)
+  opts.isRefused = true
+  s.tokens = 60_000
+  const refused = await $.command.run({ command: 'compact', args: 'now', ...person })
+  expect(refused.context).toBeUndefined()
+})
+
+test('a typed /compact now whose transcript cannot be read still compacts and arms the stray guard', async ($, on) => {
+  const { s } = typedSession($, on, { isUnreadable: true, isBypassed: true })
+  const done = await $.command.run({ command: 'compact', args: 'now', ...person })
+  expect(done.text).toMatch(/^Compacted/)
+  expect(done.context).toBeUndefined()
+  s.tokens = 60_000
+  const stray = await $.command.run({ command: 'compact', args: '', ...person })
+  expect(stray.text).toMatch(/Ignored a \/compact right after a compaction/)
+})
+
+test('with autoCompact off, a held /compact tells the user to type it again', { options: { autoCompact: false } }, async ($, on) => {
+  const { clock, s } = typedSession($, on)
+  const held = await $.command.run({ command: 'compact', args: '', ...person })
+  expect(held.text).toMatch(/type \/compact again once it is ready/)
+  expect(/by itself/.test(held.text ?? '')).toBe(false)
+  await clock.advance(600)
+  expect(s.prompts[0]).toMatch(/tell the user it is ready so they can compact, then wait/)
 })

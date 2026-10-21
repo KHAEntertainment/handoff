@@ -1,4 +1,4 @@
-import type { EngineInterface, Register, SessionMessage } from 'claude-code'
+import type { CommandRunResult, EngineInterface, Register, SessionMessage } from 'claude-code'
 
 // armed: watching the fill. nudged: handoff asked for. ready: handoff on disk.
 // cooling: just compacted, waiting for the fill to drop before watching again.
@@ -26,6 +26,10 @@ let isTraycer = false
 let isCompacting = false
 // Set while a compaction this mod queued through the command is still to arrive.
 let isOwnPending = false
+// Set while a /compact the command.run hook already decided is running, so session.compact does not decide it again.
+let isRouted = false
+// Set when session.compact reached this mod inside a routed /compact and the compaction was installed.
+let isRoutedInstalled = false
 // The compaction window can be smaller than the model's, so measure against it.
 let limit: { window: number; tokens: number } | undefined
 // When the last compaction finished, for ignoring a stray /compact right after it.
@@ -246,6 +250,46 @@ const digest = (messages: readonly SessionMessage[], last?: number) => {
   ].join('\n')
 }
 
+// Command output is shown under the names of the plugins hooking the command, so these carry no name of their own.
+// With autoCompact off nothing compacts by itself: the agent tells the user and the user types /compact again.
+const held = () =>
+  isAuto
+    ? 'Compaction postponed until the handoff is written; it compacts by itself after that. Type /compact now to compact at once.'
+    : 'Compaction postponed until the handoff is written; type /compact again once it is ready. Type /compact now to compact at once.'
+const IGNORED = 'Ignored a /compact right after a compaction (the context is nearly empty). Type /compact now to force one.'
+
+// Only the person's Enter is stamped `composer`. From anywhere else it may not be the user, so the prompt does not say it was.
+const leadFor = (typed: string, isPerson: boolean) => {
+  if (typed === '')
+    return isPerson
+      ? 'The user asked to compact this session.'
+      : 'A /compact command arrived for this session. The mod cannot tell whether the user typed it. If it looks spurious (for example right after a compaction, with little context used), say so and carry on instead of writing a handoff.'
+  return isPerson
+    ? `The user asked to compact this session, with these instructions for it: "${typed}".`
+    : `A /compact command arrived for this session, with these instructions for it: "${typed}". The mod cannot tell whether the user typed it.`
+}
+
+// A compaction held for a handoff: the request goes out as a prompt of its own, once the skip reply has landed.
+async function askFirst($: EngineInterface, lead: string) {
+  await locate($)
+  phase = 'nudged'
+  nudgedAt = await $.clock.now()
+  stepsSinceNudge = 0
+  stepsSinceReady = 0
+  hasChased = false
+  $.clock.after(500, () => void $.prompt.submit({ text: ask(lead) }))
+}
+
+async function routed<T>(run: () => Promise<T>) {
+  isRouted = true
+  isRoutedInstalled = false
+  try {
+    return await run()
+  } finally {
+    isRouted = false
+  }
+}
+
 // What a compaction this mod did not start leaves for the agent to read afterwards.
 const noteFor = (hasHandoff: boolean, messages: readonly SessionMessage[]) => {
   if (!hasHandoff) {
@@ -262,6 +306,32 @@ const noteFor = (hasHandoff: boolean, messages: readonly SessionMessage[]) => {
     ...(since === undefined ? [] : ['A mechanical record of that later work:', since]),
     'Read a file again before you edit it.',
   ].join('\n')
+}
+
+// After a compaction this mod did not start: wait for the fill to drop, send the ADHD reminder, return the note.
+async function afterOther($: EngineInterface, hasHandoff: boolean, messages: readonly SessionMessage[]) {
+  const note = noteFor(hasHandoff, messages)
+  phase = 'cooling'
+  lastCompactAt = await $.clock.now()
+  // The compaction gets no resume prompt, so the reminder is sent on its own, after the session-start
+  // injections. It is a prompt of its own, so the agent answers it.
+  const reminder = await adhdReminder($)
+  if (reminder !== undefined) {
+    const text = `[context-handoff] The context was compacted. ${reminder} Nobody is waiting for a reply to this message: if you were mid-task, carry on; otherwise answer in one line.`
+    $.clock.after(750, () => void $.prompt.submit({ text }))
+  }
+  return note
+}
+
+// A typed /compact let through: run it, then leave the note as the command's context, read after the summary.
+async function compactTyped($: EngineInterface, run: () => Promise<CommandRunResult>, hasHandoff: boolean) {
+  const before = await $.session.messages().catch(() => [] as SessionMessage[])
+  const done = await routed(run)
+  // Only the engine's own word says it compacted: session.compact installing messages where it still reaches this
+  // mod, else the command's output ("Compacted · 418,794 → 33,070 tokens"; a skip reads "Not compacted · ...").
+  if (!isRoutedInstalled && !/^Compacted\b/.test(done.text ?? '')) return done
+  const note = await afterOther($, hasHandoff, before)
+  return note === undefined ? done : { ...done, context: [...(done.context ?? []), note] }
 }
 
 export const register: Register = (on, options) => {
@@ -302,9 +372,48 @@ export const register: Register = (on, options) => {
     return done
   })
 
+  // A typed /compact. Since Claude Code 2.1.301 the built-in cc-plugin-sec-default hands session.compact past
+  // user plugins, so this is where the command is held; session.compact below covers the rest where it still fires.
+  on('command.run', { command: 'compact' }, async ($, e, next) => {
+    const typed = e.args.trim()
+    const seen = { trigger: `command:${e.origin.kind}`, instructions: e.args }
+    if (e.origin.kind === 'plugin' && typed.includes(OWN_COMPACT)) {
+      // This mod's own headless fallback, maybe queued until now: the one place it is cleared on success.
+      await logCompact($, seen, 'own')
+      isOwnPending = false
+      return routed(() => next(e))
+    }
+    const hasHandoff = (phase === 'nudged' || phase === 'ready') && (await isWritten($))
+    if (/^now\b/i.test(typed)) {
+      // `/compact now` skips waiting for a handoff, but one already on disk is still pointed at.
+      await logCompact($, seen, 'now')
+      const args = typed.replace(/^now\b[\s:,-]*/i, '')
+      return compactTyped($, () => next({ ...e, args }), hasHandoff)
+    }
+    if (hasHandoff) {
+      await logCompact($, seen, 'handoff on disk')
+      return compactTyped($, () => next(e), true)
+    }
+    if (typed === '' && (await justCompacted($))) {
+      // See session.compact below: a stray bare /compact right after a compaction is not worth a handoff.
+      await logCompact($, seen, 'ignored: just compacted')
+      $.ui.log('ignored a bare /compact right after a compaction; the context is well under the threshold')
+      return { text: IGNORED }
+    }
+    await logCompact($, seen, 'asked for a handoff')
+    await askFirst($, leadFor(typed, e.origin.kind === 'composer'))
+    return { text: held() }
+  })
+
   // Any compaction this mod did not start: the threshold's, or a typed /compact.
   on('session.compact', async ($, e, next) => {
     if (e.agentId !== undefined || e.trigger === 'precompute') return next(e)
+    if (isRouted) {
+      await logCompact($, e, 'routed')
+      const done = await next(e)
+      if (done.messages !== undefined) isRoutedInstalled = true
+      return done
+    }
     if (isCompacting || isOwnPending || (e.instructions ?? '').includes(OWN_COMPACT)) {
       await logCompact($, e, 'own')
       isOwnPending = false
@@ -328,33 +437,14 @@ export const register: Register = (on, options) => {
         return { skip: 'context-handoff: ignored a /compact right after a compaction (the context is nearly empty). Type /compact now to force one.' }
       } else if (!hasHandoff) {
         await logCompact($, e, 'asked for a handoff')
-        await locate($)
-        phase = 'nudged'
-        nudgedAt = await $.clock.now()
-        stepsSinceNudge = 0
-        stepsSinceReady = 0
-        hasChased = false
-        // The mod cannot tell a typed command from one the harness sent, so it must not claim the user typed it.
-        const lead =
-          typed === ''
-            ? 'A /compact command arrived for this session. The mod cannot tell whether the user typed it. If it looks spurious (for example right after a compaction, with little context used), say so and carry on instead of writing a handoff.'
-            : `The user asked to compact this session, with these instructions for it: "${typed}".`
-        $.clock.after(500, () => void $.prompt.submit({ text: ask(lead) }))
-        return { skip: 'context-handoff: asking for a handoff first; it compacts once that is written. Type /compact now to compact at once.' }
+        // This event carries no origin, so the prompt never says the user asked: only command.run can tell.
+        await askFirst($, leadFor(typed, false))
+        return { skip: `context-handoff: ${held()}` }
       }
     }
     const done = await next(pass)
     if (done.messages === undefined) return done
-    const note = noteFor(hasHandoff, e.messages)
-    phase = 'cooling'
-    lastCompactAt = await $.clock.now()
-    // A compaction this mod did not start gets no resume prompt, so the reminder is sent on its own,
-    // after the session-start injections. It is a prompt of its own, so the agent answers it.
-    const reminder = await adhdReminder($)
-    if (reminder !== undefined) {
-      const text = `[context-handoff] The context was compacted. ${reminder} Nobody is waiting for a reply to this message: if you were mid-task, carry on; otherwise answer in one line.`
-      $.clock.after(750, () => void $.prompt.submit({ text }))
-    }
+    const note = await afterOther($, hasHandoff, e.messages)
     if (note === undefined) return done
     const added: SessionMessage = { role: 'user', text: note, toolUses: [] }
     const first = done.messages[0]
