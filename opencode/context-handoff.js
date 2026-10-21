@@ -197,7 +197,12 @@ export const ContextHandoff = async ({ client }) => {
     // An `edit` ask names its target relative to the session's directory; resolve it there, never guess.
     const toAbsolute = async path => {
       if (typeof path !== 'string') return undefined
-      if (path.startsWith('/')) return resolve(path)
+      const parts = path.split('/')
+      // Absolute: already normalised, no dot segments. Relative: `..` only as a leading climb, never after a name.
+      if (parts.includes('.') || parts.includes('') && !path.startsWith('/')) return undefined
+      if (path.startsWith('/')) return !parts.includes('..') && resolve(path) === path.replace(/\/+$/, '') ? path.replace(/\/+$/, '') : undefined
+      const firstName = parts.findIndex(part => part !== '..')
+      if (firstName === -1 || parts.slice(firstName).includes('..')) return undefined
       st.directory ??= await client.session.get({ path: { id: ask.sessionID } }).then(r => r?.data?.directory, () => undefined)
       return typeof st.directory === 'string' && st.directory.startsWith('/') ? resolve(st.directory, path) : undefined
     }
