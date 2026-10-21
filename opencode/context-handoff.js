@@ -179,6 +179,34 @@ export const ContextHandoff = async ({ client }) => {
     }
   }
 
+  // The agent has to read and write its own handoff, which sits outside the worktree. Some hosts answer
+  // those permission asks with a rule that overrides user config, and nobody is there to approve, so the
+  // plugin approves them itself. Narrow on purpose: only for a session this plugin is tracking, only for the
+  // exact handoff file it assigned to that session (or that file's folder, as `external_directory` asks
+  // for), and never when any path in the ask is relative, unresolved or points elsewhere. (OpenCode 1.18
+  // does not call the `permission.ask` plugin hook; it does emit `permission.asked`, so the reply goes
+  // through the client.)
+  const approveHandoffAsk = async ask => {
+    const type = ask.permission ?? ask.type
+    if (type !== 'external_directory' && type !== 'edit' && type !== 'read') return
+    const st = sessions.get(ask.sessionID)
+    if (st === undefined || st.isChild || st.handoff === '') return
+    const file = st.handoff
+    const folder = file.slice(0, file.lastIndexOf('/'))
+    const paths = [ask.metadata?.filepath, ask.metadata?.parentDir, ...[].concat(ask.patterns ?? ask.pattern ?? [])]
+    if (paths.length === 0) return
+    const allowed = path =>
+      typeof path === 'string' &&
+      path.startsWith('/') &&
+      !path.split('/').includes('..') &&
+      (path === file || path === folder || path === `${folder}/*`)
+    if (!paths.every(path => path === undefined || allowed(path))) return
+    if (!paths.some(path => path === file)) return
+    const result = await client.postSessionIdPermissionsPermissionId({ path: { id: ask.sessionID, permissionID: ask.id }, body: { response: 'once' } })
+      .then(r => (r?.error ? JSON.stringify(r.error) : undefined), error => String(error))
+    log(result === undefined ? `approved ${type} ask for the handoff file ${file}` : `could not approve ${type} ask for ${file}: ${result}`)
+  }
+
   return {
     'chat.message': async input => {
       const st = state(input.sessionID)
@@ -215,6 +243,10 @@ export const ContextHandoff = async ({ client }) => {
     },
     event: async ({ event }) => {
       const p = event.properties ?? {}
+      if (event.type === 'permission.asked' || event.type === 'permission.updated') {
+        await approveHandoffAsk(p).catch(error => log(`permission handling failed: ${error}`))
+        return
+      }
       if (event.type === 'session.created' || event.type === 'session.updated') {
         if (p.info?.parentID) state(p.info.id).isChild = true
       } else if (event.type === 'message.updated') {

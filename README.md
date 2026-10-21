@@ -65,7 +65,7 @@ It fails open: if a step errors, the compaction or the session carries on as if 
 
 Manual installs, no packaging yet:
 
-- `opencode/context-handoff.js`: copy or symlink to `~/.config/opencode/plugins/`. Working.
+- `opencode/context-handoff.js`: copy or symlink to `~/.config/opencode/plugins/`. Working. It approves its own handoff-folder permission asks, because a resumed agent reading the handoff would otherwise wait on a prompt nobody answers in headless hosts.
 - `codex/context_handoff.py`: Codex hooks cannot start a compaction, so this version asks for the handoff near Codex's auto-compact limit and re-points the agent afterwards. In progress.
 
 ## Development
