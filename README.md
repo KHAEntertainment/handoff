@@ -72,7 +72,7 @@ It fails open: if a step errors, the compaction or the session carries on as if 
 Manual installs, no packaging yet:
 
 - `opencode/context-handoff.js`: copy or symlink to `~/.config/opencode/plugins/`. Working. It approves its own handoff-folder permission asks, because a resumed agent reading the handoff would otherwise wait on a prompt nobody answers in headless hosts.
-- `codex/context_handoff.py`: Codex hooks cannot start a compaction, so this version asks for the handoff near Codex's auto-compact limit and re-points the agent afterwards. A manual `/compact` with no handoff on disk is held once (`PreCompact`, Codex 0.163 or later), the next prompt asks for the handoff, and a second `/compact` goes through. An automatic compaction is never held. Register it in `~/.codex/hooks.json`, then approve the hooks in Codex's `/hooks` screen: Codex runs only hooks it trusts, and any edit to a hook resets its approval.
+- `codex/context_handoff.py`: Codex hooks cannot start a compaction, so this version asks for the handoff near Codex's auto-compact limit and re-points the agent afterwards. A manual `/compact` with no handoff on disk is held once (`PreCompact`, Codex 0.163 or later), the next prompt asks for the handoff, and a second `/compact` goes through. An automatic compaction is never held. Register it in `hooks.json` in the active Codex home (`$CODEX_HOME/hooks.json`, default `~/.codex/hooks.json`), then approve the hooks in Codex's `/hooks` screen: Codex runs only hooks it trusts, and any edit to a hook resets its approval.
 
   ```json
   {
