@@ -3,18 +3,22 @@
 
 Codex hooks cannot start a compaction, so this version asks for the handoff close to Codex's own
 auto-compact limit, has the agent keep working and keep the handoff current, and points the agent
-at it once Codex compacts.
+at it once Codex compacts. A manual /compact with no handoff on disk is held once, and the next
+prompt asks for the handoff; running /compact again lets it through.
 
   post-tool      PostToolUse: watch the context fill, ask for the handoff, keep it current
   stop           Stop: ask once more if the turn ends with the handoff still missing
+  pre-compact    PreCompact: hold a manual /compact once while no handoff exists
+  prompt         UserPromptSubmit: after a hold, ask for the handoff
   session-start  SessionStart (compact): point the agent at the handoff
 """
-import json, os, sys, time, tomllib
+import glob, json, os, sys, time, tomllib
 
 THRESHOLD = float(os.environ.get('CONTEXT_HANDOFF_CODEX_THRESHOLD', 90))
 REMIND_AFTER_STEPS = 30
 REFRESH_EVERY_STEPS = 15
 HOME = os.path.expanduser('~')
+CODEX_HOME = os.environ.get('CODEX_HOME') or os.path.join(HOME, '.codex')
 STATE_DIR = os.path.join(HOME, '.codex', 'context-handoff')
 EPIC = os.environ.get('TRAYCER_EPIC_ID') or ''
 AGENT = os.environ.get('TRAYCER_AGENT_ID') or ''
@@ -29,7 +33,7 @@ def load(sid):
         with open(os.path.join(STATE_DIR, f'{sid}.json')) as f:
             return json.load(f)
     except Exception:
-        return {'phase': 'armed', 'handoff': '', 'nudged_at': 0, 'steps': 0, 'since_ready': 0, 'chased': False}
+        return {'phase': 'armed', 'handoff': '', 'nudged_at': 0, 'steps': 0, 'since_ready': 0, 'chased': False, 'held': False, 'asked': False}
 
 
 def save(sid, st):
@@ -44,7 +48,7 @@ def compact_limit(window):
     """Codex compacts at model_auto_compact_token_limit, capped by the model's own window."""
     limit = None
     try:
-        with open(os.path.join(HOME, '.codex', 'config.toml'), 'rb') as f:
+        with open(os.path.join(CODEX_HOME, 'config.toml'), 'rb') as f:
             limit = tomllib.load(f).get('model_auto_compact_token_limit')
     except Exception:
         pass
@@ -52,9 +56,17 @@ def compact_limit(window):
     return min(candidates) if candidates else None
 
 
+def rollout(transcript, sid):
+    """The session's rollout file. Codex passes it as transcript_path, but may send null."""
+    if transcript and os.path.exists(transcript):
+        return transcript
+    found = glob.glob(os.path.join(CODEX_HOME, 'sessions', '*', '*', '*', f'rollout-*-{sid}.jsonl'))
+    return max(found, key=os.path.getmtime) if found else None
+
+
 def fill(transcript):
     """The newest token_count record: the tokens the last request was answered over, and the window."""
-    if not transcript or not os.path.exists(transcript):
+    if not transcript:
         return None
     size = os.path.getsize(transcript)
     with open(transcript, 'rb') as f:
@@ -89,7 +101,10 @@ def written(st):
     return info.st_size > 200 and info.st_mtime >= st['nudged_at'] - 1
 
 
-def ask(st, lead):
+def ask(st, lead, held=False):
+    then = ('Then stop and tell the user the handoff is written, so they can run /compact again. Do not message anyone else about this.'
+            if held else
+            'Then carry on with your task. Codex compacts this session on its own soon; until then, keep sections 2 and 5 of the handoff current as you work. Do not message anyone about this.')
     return '\n'.join([
         f'[context-handoff] {lead} Compaction keeps only part of the conversation and drops tool output detail.',
         '',
@@ -106,7 +121,7 @@ def ask(st, lead):
         '6. Must survive: instructions and constraints from the user or orchestrator, things not to do, steps only the owner may take, waits or timers in progress.',
         'Point to what git or a file already records rather than copying it.',
         '',
-        'Then carry on with your task. Codex compacts this session on its own soon; until then, keep sections 2 and 5 of the handoff current as you work. Do not message anyone about this.',
+        then,
     ])
 
 
@@ -124,13 +139,15 @@ def post_tool(data):
         if written(st):
             st['phase'] = 'ready'
             st['since_ready'] = 0
-            note = f'[context-handoff] Handoff found at {st["handoff"]}. Carry on with your task and keep it current.'
+            note = (f'[context-handoff] Handoff found at {st["handoff"]}. Tell the user it is written, so they can run /compact again.'
+                    if st.get('held') else
+                    f'[context-handoff] Handoff found at {st["handoff"]}. Carry on with your task and keep it current.')
         else:
             st['steps'] += 1
             if st['steps'] == REMIND_AFTER_STEPS:
                 note = f'[context-handoff] Reminder: the handoff asked for earlier is still missing at {st["handoff"]}. Write it at the next safe point.'
     else:
-        got = fill(data.get('transcript_path'))
+        got = fill(rollout(data.get('transcript_path'), sid))
         if got:
             tokens, window = got
             limit = compact_limit(window)
@@ -155,7 +172,35 @@ def stop(data):
         return
     st['chased'] = True
     save(sid, st)
-    print(json.dumps({'decision': 'block', 'reason': f'[context-handoff] The resume handoff asked for earlier is still missing. Write it now at {st["handoff"]}, following the outline you were given, then finish what you were doing.'}))
+    then = 'then stop and tell the user it is written, so they can run /compact again' if st.get('held') else 'then finish what you were doing'
+    print(json.dumps({'decision': 'block', 'reason': f'[context-handoff] The resume handoff asked for earlier is still missing. Write it now at {st["handoff"]}, following the outline you were given, {then}.'}))
+
+
+def pre_compact(data):
+    # Only a manual /compact is held: blocking an automatic one would abort the agent's working turn.
+    if data.get('agent_id') or data.get('trigger') != 'manual':
+        return
+    sid = data['session_id']
+    st = load(sid)
+    if st.get('held') or (st['handoff'] and written(st)):
+        # A handoff is on disk, or this /compact was already held once: let it through.
+        return
+    locate(st, sid)
+    st.update(phase='nudged', nudged_at=time.time(), steps=0, since_ready=0, chased=False, held=True, asked=False)
+    save(sid, st)
+    print(json.dumps({'continue': False, 'stopReason': '[context-handoff] Compaction postponed: there is no resume handoff yet. Send any message and the agent writes one first, then run /compact again. Run /compact again now to compact without it.'}))
+
+
+def prompt(data):
+    sid = data['session_id']
+    if data.get('agent_id'):
+        return
+    st = load(sid)
+    if not st.get('held') or st.get('asked') or st['phase'] != 'nudged' or written(st):
+        return
+    st['asked'] = True
+    save(sid, st)
+    emit('UserPromptSubmit', ask(st, 'The user ran /compact. It is postponed until a resume handoff exists.', held=True))
 
 
 def session_start(data):
@@ -165,7 +210,7 @@ def session_start(data):
     st = load(sid)
     has = st['handoff'] and written(st)
     since = st.get('since_ready', 0)
-    st.update(phase='cooling', steps=0, since_ready=0, chased=False)
+    st.update(phase='cooling', steps=0, since_ready=0, chased=False, held=False, asked=False)
     save(sid, st)
     if has:
         tail = f' It was last updated about {since} tool calls before the compaction; anything after that is not in it.' if since else ''
@@ -175,7 +220,7 @@ def session_start(data):
 def main():
     try:
         data = json.load(sys.stdin)
-        {'post-tool': post_tool, 'stop': stop, 'session-start': session_start}[sys.argv[1]](data)
+        {'post-tool': post_tool, 'stop': stop, 'pre-compact': pre_compact, 'prompt': prompt, 'session-start': session_start}[sys.argv[1]](data)
     except Exception as error:
         # A failing hook must never break the session: say why on stderr and pass.
         print(f'context-handoff: {error}', file=sys.stderr)
