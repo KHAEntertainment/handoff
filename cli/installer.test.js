@@ -268,14 +268,30 @@ describe('older installs', () => {
 })
 
 describe('status', () => {
-  test('reports how many Codex hooks are approved', () => {
+  const hook = (key, trustStatus) => ({ key, command: 'python3 "$PLUGIN_ROOT/context_handoff.py" stop', trustStatus })
+  const plugin = (n, trustStatus) => hook(`handoff@handoff:hooks.json:post_tool_use:${n}:0`, trustStatus)
+  const manual = (n, trustStatus) => hook(`/home/x/.codex/hooks.json:stop:${n}:0`, trustStatus)
+
+  test('reports plugin hook approval and older manual entries separately', () => {
     const sb = sandbox()
     sb.write('.codex/config.toml', '[plugins."handoff@handoff"]\nenabled = true\n')
-    const hook = (trustStatus) => ({ command: 'python3 "$PLUGIN_ROOT/context_handoff.py" stop', trustStatus, pluginId: 'handoff@handoff' })
-    const hooks = JSON.stringify([hook('trusted'), hook('trusted'), hook('untrusted'), hook('modified'), { command: 'node other.js', trustStatus: 'untrusted' }])
+    const hooks = JSON.stringify([
+      plugin(0, 'trusted'), plugin(1, 'trusted'), plugin(2, 'trusted'), plugin(3, 'untrusted'), plugin(4, 'modified'),
+      manual(0, 'trusted'), manual(1, 'trusted'),
+      { key: 'other@x:hooks.json:stop:0:0', command: 'node other.js', trustStatus: 'untrusted' },
+    ])
     const { code, out } = sb.run(['status'], { FAKE_HOOKS: hooks })
     assert.equal(code, 0)
-    assert.match(out, /hook trust: 2 of 4 hooks approved \(1 untrusted, 1 modified\)/)
+    assert.match(out, /plugin: 3 of 5 approved \(1 untrusted, 1 modified\)/)
+    assert.match(out, /manual hooks\.json entries: 2 \(older install; rerun install to replace\)/)
+  })
+
+  test('a fully approved plugin with no manual entries says only that', () => {
+    const sb = sandbox()
+    sb.write('.codex/config.toml', '[plugins."handoff@handoff"]\nenabled = true\n')
+    const { out } = sb.run(['status'], { FAKE_HOOKS: JSON.stringify([plugin(0, 'trusted'), plugin(1, 'trusted')]) })
+    assert.match(out, /plugin: 2 of 2 approved\n/)
+    assert.doesNotMatch(out, /manual hooks/)
   })
 })
 

@@ -4,7 +4,7 @@ import * as claude from './claude.js'
 import * as codex from './codex.js'
 import * as opencode from './opencode.js'
 import { PACKAGE_ROOT, packageInfo, stage, unstage } from './stage.js'
-import { summarizeTrust, handoffHookTrust } from './trust.js'
+import { handoffHookTrust, trustLines } from './trust.js'
 import { makeContext, readJson, tilde } from './util.js'
 import { join } from 'node:path'
 
@@ -156,7 +156,12 @@ async function status(ctx) {
     if (info.id === 'opencode' && info.ours) lines.push(`  plugins/handoff.js is ${opencode.isCurrent(ctx) ? 'the version shipped with this package' : 'different from this package version'}`)
     if (info.id === 'codex' && info.version && (info.ours || info.legacy.length > 0)) {
       const trust = await handoffHookTrust(ctx)
-      lines.push(`  hook trust: ${trust.error ? `unknown (${trust.error})` : summarizeTrust(trust.hooks)}`)
+      if (trust.error) lines.push(`  hook trust: unknown (${trust.error})`)
+      else {
+        const found = trustLines(trust.hooks)
+        if (found.length === 0 && info.ours) found.push('plugin: no handoff hooks registered')
+        lines.push(...found.map((line) => `  ${line}`))
+      }
     }
     clack.log.message(lines.join('\n'))
   }

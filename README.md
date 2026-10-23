@@ -20,7 +20,7 @@ npx @khaentertainment/handoff status                                 # versions,
 npx @khaentertainment/handoff uninstall
 ```
 
-Inside an agent, in CI, or without a terminal it skips the prompts and uses every harness it finds. User scope only. Node 20.12 or later.
+Inside an agent, in CI, or without a terminal it skips the prompts and uses every harness it finds. User scope only. Needs Node 20.12 or later.
 
 What it does, per harness:
 

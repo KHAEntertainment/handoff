@@ -42,10 +42,20 @@ export function handoffHookTrust(ctx, { cwd = process.cwd(), timeoutMs = 20000 }
   })
 }
 
-export function summarizeTrust(hooks) {
-  if (hooks.length === 0) return 'no handoff hooks registered'
-  const count = (status) => hooks.filter((hook) => hook.trustStatus === status).length
-  if (count('trusted') === hooks.length) return `all ${hooks.length} hooks approved`
-  const parts = ['untrusted', 'modified'].map((status) => [count(status), status]).filter(([n]) => n > 0).map(([n, s]) => `${n} ${s}`)
-  return `${count('trusted')} of ${hooks.length} hooks approved (${parts.join(', ')}); approve them in Codex's /hooks screen`
+/** A plugin hook's key starts with its plugin id (`handoff@handoff:hooks.json:...`); a manual one with the hooks.json path. */
+export const isPluginHook = (hook) => String(hook.key ?? '').startsWith('handoff@')
+
+/** Status lines for the Codex hooks: the plugin's approval, and any older manual entries. */
+export function trustLines(hooks) {
+  const plugin = hooks.filter(isPluginHook)
+  const manual = hooks.filter((hook) => !isPluginHook(hook))
+  const lines = []
+  if (plugin.length > 0) {
+    const count = (status) => plugin.filter((hook) => hook.trustStatus === status).length
+    const trusted = count('trusted')
+    const rest = ['untrusted', 'modified'].map((status) => [count(status), status]).filter(([n]) => n > 0).map(([n, s]) => `${n} ${s}`)
+    lines.push(`plugin: ${trusted} of ${plugin.length} approved${trusted === plugin.length ? '' : ` (${rest.join(', ')}); approve them in Codex's /hooks screen`}`)
+  }
+  if (manual.length > 0) lines.push(`manual hooks.json entries: ${manual.length} (older install; rerun install to replace)`)
+  return lines
 }
