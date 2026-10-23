@@ -151,7 +151,7 @@ async function uninstall(ctx, args, unattended) {
     }
   }
   // The staged marketplace goes once neither Claude Code nor Codex still installs from it.
-  const stillUsed = probes.some((info) => (info.id === 'claude' || info.id === 'codex') && info.ours && !ids.includes(info.id))
+  const stillUsed = probes.some((info) => (info.id === 'claude' || info.id === 'codex') && info.removable && !ids.includes(info.id))
   if (!stillUsed && !results.some((result) => result.status === 'failed')) unstage(ctx)
   return report(results, 'Removed.')
 }

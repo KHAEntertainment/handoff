@@ -65,6 +65,12 @@ export function install(ctx, info, { switchKha }) {
   if (info.marketplace === 'foreign') {
     throw new Error(`a marketplace named "${MARKETPLACE}" is already registered from ${info.foreignSource}, not from handoff. Not touching it. Remove it yourself (claude plugin marketplace remove ${MARKETPLACE}) if you want this install.`)
   }
+  // Before anything is installed: every scope of the old copy has to be reachable to uninstall it.
+  for (const entry of info.khaEntries) {
+    if (entry.projectPath && !exists(entry.projectPath)) {
+      throw new Error(`${KHA} is installed in ${entry.scope ?? 'user'} scope for ${entry.projectPath}, but that folder does not exist, so it cannot be uninstalled there. Restore the folder or remove that entry (claude plugin uninstall ${KHA} --scope ${entry.scope ?? 'user'} from inside it), then run this again.`)
+    }
+  }
   transact((undo) => {
     if (info.marketplace === 'ours') runOrThrow(ctx, 'claude', ['plugin', 'marketplace', 'update', MARKETPLACE])
     else {

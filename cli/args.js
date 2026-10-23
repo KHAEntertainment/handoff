@@ -27,7 +27,9 @@ export function parseArgs(argv) {
       const value = arg.includes('=') ? arg.slice(arg.indexOf('=') + 1) : argv[++i]
       if (!value) throw new Error('--harness needs a value, for example --harness claude,codex')
       out.harness ??= []
-      for (const raw of value.split(',').map((v) => v.trim().toLowerCase()).filter(Boolean)) {
+      const names = value.split(',').map((v) => v.trim().toLowerCase()).filter(Boolean)
+      if (names.length === 0) throw new Error(`--harness "${value}" names no harness. Use: ${HARNESS_IDS.join(', ')}`)
+      for (const raw of names) {
         const id = ALIASES[raw] ?? raw
         if (!HARNESS_IDS.includes(id)) throw new Error(`Unknown harness "${raw}". Use: ${HARNESS_IDS.join(', ')}`)
         if (!out.harness.includes(id)) out.harness.push(id)
@@ -52,5 +54,8 @@ const AGENT_VARS = ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CODEX_THREAD_ID', '
 
 /** True when no person is at the prompt: an agent, CI, or no terminal. */
 export function isUnattended(env, tty) {
-  return !tty || AGENT_VARS.some((name) => env[name])
+  return !tty || AGENT_VARS.some((name) => isSet(env[name]))
 }
+
+/** An env var counts when it has a value other than an explicit "off": CI=false and CI=0 are not CI. */
+const isSet = (value) => Boolean(value) && !/^(0|false|no|off)$/i.test(value.trim())

@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { after, describe, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { isUnattended } from './args.js'
 
 const BIN = join(dirname(fileURLToPath(import.meta.url)), 'bin.js')
 const FAKE = `#!${process.execPath}
@@ -84,6 +85,28 @@ const FRESH = [
   'codex plugin marketplace add STAGE',
   'codex plugin add handoff@handoff',
 ]
+
+describe('arguments and environment', () => {
+  test('--harness that names no harness is an error', () => {
+    const sb = sandbox()
+    for (const args of [['--harness=,,'], ['--harness', ','], ['--harness=']]) {
+      const { code, out } = sb.run(args)
+      assert.equal(code, 2, args.join(' '))
+      assert.match(out, /--harness|names no harness/)
+    }
+    assert.deepEqual(sb.calls(), [])
+    assert.equal(existsSync(stage(sb)), false)
+  })
+
+  test('explicit false values of an agent or CI variable do not make a run unattended', () => {
+    for (const value of ['', '0', 'false', 'FALSE', 'no', 'Off', ' false ']) {
+      assert.equal(isUnattended({ CI: value, CLAUDECODE: value }, true), false, JSON.stringify(value))
+    }
+    for (const value of ['1', 'true', 'yes', 'claude-code']) assert.equal(isUnattended({ CI: value }, true), true, value)
+    assert.equal(isUnattended({}, false), true, 'no terminal')
+    assert.equal(isUnattended({ CI: 'false' }, false), true, 'no terminal')
+  })
+})
 
 describe('detection', () => {
   test('status lists the version and home of each harness found', () => {
@@ -436,6 +459,15 @@ describe('rollback when cleanup of the old copy fails', () => {
     ])
   })
 
+  test('Claude: an old copy whose project folder is gone is reported before anything is installed', () => {
+    const sb = sandbox()
+    khaScopes(sb, { scope: 'user', version: '0.1.2' }, { scope: 'project', version: '0.1.2', projectPath: sb.path('work/gone') })
+    const { code, out } = sb.run(['--harness', 'claude', '--switch-claude', '-y'])
+    assert.equal(code, 1)
+    assert.match(out, /installed in project scope for .*work\/gone, but that folder does not exist/)
+    assert.deepEqual(sb.calls(), [])
+  })
+
   test('Claude: an upgrade that fails later does not uninstall the copy that was already there', () => {
     const sb = sandbox()
     sb.write('.claude/plugins/installed_plugins.json', { version: 2, plugins: { 'handoff@handoff': [{ scope: 'user', version: '0.2.0' }], 'handoff@kha-marketplace': [{ scope: 'user', version: '0.1.2' }] } })
@@ -621,6 +653,19 @@ describe('uninstall', () => {
     assert.equal(existsSync(sb.path('.config/opencode/plugins/handoff.js')), false)
     sb.run(['uninstall', '--harness', 'claude', '-y'])
     assert.equal(existsSync(stage(sb)), true, 'codex still installs from it')
+  })
+
+  test('the staged copy stays while another harness still has a marketplace pointing at it, even with its plugin gone', () => {
+    const sb = sandbox()
+    sb.run(['--harness', 'codex', '-y'])
+    sb.write('.codex/config.toml', codexConfig(sb))
+    sb.write('.claude/plugins/known_marketplaces.json', claudeMarketplaces(sb))
+    assert.equal(sb.run(['uninstall', '--harness', 'codex', '-y']).code, 0)
+    assert.equal(existsSync(stage(sb)), true)
+    // Once Codex is really gone (the fake leaves its config alone) and Claude's registration goes too, so does the staged copy.
+    writeFileSync(sb.path('.codex/config.toml'), '')
+    assert.equal(sb.run(['uninstall', '--harness', 'claude', '-y']).code, 0)
+    assert.equal(existsSync(stage(sb)), false)
   })
 
   test('with nothing installed it says so and succeeds', () => {
