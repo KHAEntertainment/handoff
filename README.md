@@ -132,7 +132,7 @@ The message prefix `[context-handoff]` in prompts and notes is the plugin's orig
 ### Releasing
 
 1. Set the same version in `package.json` and `.claude-plugin/plugin.json`, and turn the CHANGELOG's `## Unreleased` into `## <version>`.
-2. Tag and push: `git tag v<version> && git push origin v<version>`.
+2. Commit the version and changelog changes, then tag that commit and push both: `git commit -am "Release v<version>"`, `git tag v<version>`, `git push origin HEAD v<version>`. The tag must point at the commit with the new versions, or the tag check fails.
 3. `.github/workflows/release.yml` checks that the tag matches both versions, runs the tests, and stages the package on npm with trusted publishing (no npm token).
 4. Approve the staged version with 2FA: `npm stage list @khaentertainment/handoff`, then `npm stage approve <id>`, or the Staged Packages tab on npmjs.com.
 5. Create the GitHub release, then bump the `handoff` pin in [kha-marketplace](https://github.com/KHAEntertainment/marketplace).

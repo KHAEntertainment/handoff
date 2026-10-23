@@ -73,5 +73,18 @@ jobs:
             echo "@khaentertainment/handoff@$version is already on npm; nothing to publish."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
-      - if: steps.check.outputs.skip != 'true'
-        run: npm stage publish --access public
+      - name: Stage the release under the right dist-tag
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          latest=$(npm view @khaentertainment/handoff dist-tags.latest 2>/dev/null || true)
+          # A pre-release, or a version below the latest, goes under `next` so it never takes `latest`.
+          tag=latest
+          if [[ "$version" == *-* ]]; then
+            tag=next
+          elif [ -n "$latest" ] && [ "$version" != "$latest" ] &&
+            [ "$(printf '%s\n%s\n' "$latest" "$version" | sort -V | head -n1)" = "$version" ]; then
+            tag=next
+          fi
+          echo "staging $version under dist-tag $tag (latest on npm: ${latest:-none})"
+          npm stage publish --access public --tag "$tag"
