@@ -12,7 +12,7 @@ prompt asks for the handoff; running /compact again lets it through.
   prompt         UserPromptSubmit: after a hold, ask for the handoff
   session-start  SessionStart (compact): point the agent at the handoff
 """
-import glob, json, os, sys, time, tomllib
+import glob, json, os, re, sys, time
 
 THRESHOLD = float(os.environ.get('CONTEXT_HANDOFF_CODEX_THRESHOLD', 90))
 REMIND_AFTER_STEPS = 30
@@ -44,14 +44,33 @@ def save(sid, st):
     os.replace(tmp, os.path.join(STATE_DIR, f'{sid}.json'))
 
 
-def compact_limit(window):
-    """Codex compacts at model_auto_compact_token_limit, capped by the model's own window."""
-    limit = None
+def config_limit():
+    """model_auto_compact_token_limit from $CODEX_HOME/config.toml. tomllib is 3.11+, so 3.9 reads it with a regex."""
     try:
         with open(os.path.join(CODEX_HOME, 'config.toml'), 'rb') as f:
-            limit = tomllib.load(f).get('model_auto_compact_token_limit')
+            raw = f.read()
+    except OSError:
+        return None
+    try:
+        import tomllib
+    except ImportError:
+        # Top-level assignments only: a key under [profiles.x] or any other table is not the one Codex reads.
+        for line in raw.decode(errors='replace').splitlines():
+            if line.lstrip().startswith('['):
+                return None
+            found = re.match(r'\s*model_auto_compact_token_limit\s*=\s*(\d+(?:_\d+)*)\s*(?:#.*)?$', line)
+            if found:
+                return int(found.group(1).replace('_', ''))
+        return None
+    try:
+        return tomllib.loads(raw.decode()).get('model_auto_compact_token_limit')
     except Exception:
-        pass
+        return None
+
+
+def compact_limit(window):
+    """Codex compacts at model_auto_compact_token_limit, capped by the model's own window."""
+    limit = config_limit()
     candidates = [v for v in (limit, int(window * 0.9) if window else None) if v]
     return min(candidates) if candidates else None
 
