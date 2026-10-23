@@ -1,0 +1,77 @@
+# Tests every pull request. When a v* tag is pushed, publishes @khaentertainment/handoff to npm
+# through npm trusted publishing (OIDC), so no npm token is stored. npm's trusted publisher for
+# this package names this file: keep the filename release.yml.
+#
+# The release is staged (`npm stage publish`). It goes live only after a maintainer approves it with
+# 2FA: `npm stage approve <id>`, or the Staged Packages tab on npmjs.com.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  pull_request: # tests only; publishing needs a tag
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Tag matches the package versions
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          node -e '
+            const tag = process.env.TAG.replace(/^v/, "")
+            const pkg = require("./package.json").version
+            const plugin = require("./.claude-plugin/plugin.json").version
+            if (tag !== pkg || tag !== plugin) {
+              console.error(`tag ${tag}, package.json ${pkg}, .claude-plugin/plugin.json ${plugin}: they must match`)
+              process.exit(1)
+            }'
+      - run: npm ci
+      - run: node --test cli/installer.test.js
+      - run: python3 -m unittest codex/test_context_handoff.py
+
+  publish:
+    needs: test
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing (OIDC)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1 or later, and staged publishing 11.15.0 or later.
+      - run: npm install -g npm@11.20.0
+      - name: Skip a version npm already has
+        id: check
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          if npm view "@khaentertainment/handoff@$version" version >/dev/null 2>&1; then
+            echo "@khaentertainment/handoff@$version is already on npm; nothing to publish."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.check.outputs.skip != 'true'
+        run: npm stage publish --access public
