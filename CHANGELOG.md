@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - Installer: `npx @khaentertainment/handoff` (new npm package, version 0.2.0) detects Claude Code, Codex and OpenCode and installs the handoff for all or some of them (`install`, `status`, `uninstall`; `--harness`, `--all`, `-y`). It stages this version's files in `~/.handoff/marketplace`, a local marketplace for Claude Code and Codex, and copies the OpenCode plugin to `~/.config/opencode/plugins/handoff.js`. A `handoff@kha-marketplace` install is kept by default (`--switch-claude` replaces it): never both. Earlier manual Codex and OpenCode installs are replaced after a confirm, with backups in `~/.handoff/backups/`. `status` reads Codex hook approval through `codex app-server`.
 - Installer safety: config files (`hooks.json`, the install record `~/.handoff/state.json`) are written to a temp file and renamed into place, and a linked `hooks.json` is backed up by content and rewritten where it points. OpenCode's `handoff.js` is replaced or removed only when it matches what the installer wrote (`--force` backs up and takes over any other). The old Codex hooks folder is renamed aside and deleted only after the install commits, so a failed removal can never leave it half deleted. A failed cleanup of the old copy (`handoff@kha-marketplace` in every scope, or the manual Codex/OpenCode files) rolls the new install back. A marketplace named `handoff` from another source is refused and never removed.
