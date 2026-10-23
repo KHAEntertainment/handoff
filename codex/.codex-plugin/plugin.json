@@ -1,0 +1,18 @@
+{
+  "name": "handoff",
+  "version": "0.2.0",
+  "description": "Asks the agent for a resume handoff near Codex's auto-compact limit, holds a manual /compact once until it exists, and points the agent back at it afterwards.",
+  "author": { "name": "KHA Entertainment" },
+  "homepage": "https://github.com/KHAEntertainment/handoff",
+  "repository": "https://github.com/KHAEntertainment/handoff",
+  "license": "MIT",
+  "keywords": ["compaction", "handoff", "context", "hooks"],
+  "hooks": "./hooks.json",
+  "interface": {
+    "displayName": "handoff",
+    "shortDescription": "Write a resume handoff before compaction, then resume from it.",
+    "developerName": "KHA Entertainment",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Write"]
+  }
+}

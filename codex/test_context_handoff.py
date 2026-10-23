@@ -19,10 +19,13 @@ class Hook(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_hook(self, mode, env=None, **data):
+    def run_hook(self, mode, env=None, no_tomllib=False, **data):
         env = {**{k: v for k, v in os.environ.items() if not k.startswith('TRAYCER_') and k != 'CODEX_HOME'}, **(env or {})}
         env['HOME'] = self.home
-        done = subprocess.run([sys.executable, '-I', SCRIPT, mode], input=json.dumps({'session_id': SID, **data}),
+        # Python before 3.11 has no tomllib: a None entry in sys.modules makes `import tomllib` fail the same way.
+        cmd = ([sys.executable, '-I', '-c', 'import runpy, sys; sys.modules["tomllib"] = None; sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name="hook")', SCRIPT, mode]
+               if no_tomllib else [sys.executable, '-I', SCRIPT, mode])
+        done = subprocess.run(cmd, input=json.dumps({'session_id': SID, **data}),
                               capture_output=True, text=True, env=env, timeout=10)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(done.stderr, '')
@@ -136,6 +139,19 @@ class Hook(unittest.TestCase):
         self.rollout(95000, where=os.path.join(custom, 'sessions', '2026', '10', '22'))
         out = self.run_hook('post-tool', transcript_path=None, env={'CODEX_HOME': custom})
         self.assertIn('95%', out['hookSpecificOutput']['additionalContext'])
+
+    def test_threshold_without_tomllib_reads_limit_with_regex(self):
+        # 95000 is 95% of the 100000 limit in config.toml, but only 53% of the 90% window fallback.
+        with open(os.path.join(self.home, '.codex', 'config.toml'), 'w') as f:
+            f.write('model = "gpt-6"\n  model_auto_compact_token_limit = 100000  # tokens\n[profiles.x]\n')
+        out = self.run_hook('post-tool', no_tomllib=True, transcript_path=self.rollout(95000))
+        self.assertIn('95%', out['hookSpecificOutput']['additionalContext'])
+
+    def test_without_tomllib_and_no_config_the_window_is_the_limit(self):
+        os.remove(os.path.join(self.home, '.codex', 'config.toml'))
+        self.assertIsNone(self.run_hook('post-tool', no_tomllib=True, transcript_path=self.rollout(95000)))
+        out = self.run_hook('post-tool', no_tomllib=True, transcript_path=self.rollout(175000))
+        self.assertIn('97%', out['hookSpecificOutput']['additionalContext'])
 
     def test_below_threshold_stays_armed(self):
         self.assertIsNone(self.run_hook('post-tool', transcript_path=self.rollout(50000)))

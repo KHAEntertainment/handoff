@@ -1,8 +1,44 @@
 {
-  "name": "handoff",
-  "version": "0.1.2",
-  "private": true,
-  "description": "Claude Code plugin: write a resume handoff before compaction, compact, then resume from it.",
+  "name": "@khaentertainment/handoff",
+  "version": "0.2.0",
+  "description": "Write a resume handoff before compaction, compact, then resume from it. Installer for Claude Code, Codex and OpenCode.",
   "license": "MIT",
-  "scripts": { "test": "claude plugin test ." }
+  "homepage": "https://github.com/KHAEntertainment/handoff",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KHAEntertainment/handoff.git"
+  },
+  "keywords": [
+    "compaction",
+    "handoff",
+    "context",
+    "claude-code",
+    "codex",
+    "opencode"
+  ],
+  "type": "module",
+  "bin": {
+    "handoff": "cli/bin.js"
+  },
+  "files": [
+    "cli/*.js",
+    "!cli/*.test.js",
+    ".claude-plugin/plugin.json",
+    "hooks/hooks.json",
+    "hooks/register.ts",
+    "codex/.codex-plugin/plugin.json",
+    "codex/hooks.json",
+    "codex/context_handoff.py",
+    "opencode/context-handoff.js",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=20.12.0"
+  },
+  "scripts": {
+    "test": "claude plugin test ."
+  },
+  "dependencies": {
+    "@clack/prompts": "1.8.1"
+  }
 }
