@@ -1,6 +1,6 @@
-import { cpSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync } from 'node:fs'
+import { readdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { MARKETPLACE, PLUGIN, atomicWrite, backup, backupContents, canonical, cliVersion, entry, exists, readJson, readText, run, runOrThrow, tilde, transact } from './util.js'
+import { MARKETPLACE, PLUGIN, atomicWrite, backup, backupContents, canonical, cliVersion, entry, exists, quarantine, readJson, readText, run, runOrThrow, tilde, transact } from './util.js'
 
 const OURS = `${PLUGIN}@${MARKETPLACE}`
 const DONE = { install: 'installed', upgrade: 'upgraded', replace: 'installed' }
@@ -98,20 +98,27 @@ function backUpLegacy(ctx, info) {
     item.kind === 'hooks' ? backupContents(ctx, item.path, 'codex-hooks.json') : backup(ctx, item.path, 'codex-hooks-context-handoff'))
 }
 
-/** Removes the manual install. Each step registers how to put it back if a later one fails. */
-function removeLegacy(info, saved, undo) {
-  info.legacy.forEach((item, index) => {
+/**
+ * Takes the manual install out of the way. A hooks.json entry is rewritten atomically; the hooks folder or link
+ * is renamed aside (one atomic step, so a folder that cannot be fully deleted is never left half there) and
+ * deleted only after the whole install has gone through. Each step registers how to put it back.
+ * Returns the renamed-aside paths to delete once the install is committed.
+ */
+function removeLegacy(info, undo) {
+  const aside = []
+  // The folder or link first, the hooks.json edit last: the edit is the step most likely to fail.
+  for (const item of [...info.legacy].sort((x, y) => (x.kind === 'link' ? -1 : 0) - (y.kind === 'link' ? -1 : 0))) {
     if (item.kind === 'hooks') {
       const original = readFileSync(item.path)
       atomicWrite(item.path, JSON.stringify(withoutOldHooks(JSON.parse(original)), null, 2) + '\n')
       undo.add(`restored ${item.path}`, () => atomicWrite(item.path, original))
     } else {
-      const stat = entry(item.path)
-      const target = stat.isSymbolicLink() ? readlinkSync(item.path) : null
-      rmSync(item.path, { recursive: true, force: true })
-      undo.add(`restored ${item.path}`, () => (target !== null ? symlinkSync(target, item.path) : cpSync(saved[index], item.path, { recursive: true })))
+      const moved = quarantine(item.path)
+      aside.push(moved)
+      undo.add(`restored ${item.path}`, () => renameSync(moved, item.path))
     }
-  })
+  }
+  return aside
 }
 
 export function install(ctx, info, { replaceLegacy }) {
@@ -124,6 +131,7 @@ export function install(ctx, info, { replaceLegacy }) {
   }
   const replacing = replaceLegacy && info.legacy.length > 0
   const saved = replacing ? backUpLegacy(ctx, info) : []
+  let aside = []
   transact((undo) => {
     if (info.marketplace === 'none') {
       runOrThrow(ctx, 'codex', ['plugin', 'marketplace', 'add', ctx.stageDir])
@@ -131,8 +139,15 @@ export function install(ctx, info, { replaceLegacy }) {
     }
     runOrThrow(ctx, 'codex', ['plugin', 'add', OURS])
     if (!info.ours) undo.add(`removed ${OURS}`, () => runOrThrow(ctx, 'codex', ['plugin', 'remove', OURS]))
-    if (replacing) removeLegacy(info, saved, undo)
+    if (replacing) aside = removeLegacy(info, undo)
   })
+  for (const path of aside) {
+    try {
+      rmSync(path, { recursive: true, force: true })
+    } catch (error) {
+      warnings.push(`the old install was replaced, but its copy could not be deleted (${error.message}). Delete ${path} yourself.`)
+    }
+  }
   let message = `${DONE[plan(info).action]} ${OURS}. Approve its 5 hooks in Codex's /hooks screen; Codex runs none of them until then.`
   if (replacing) message += ` Replaced the manual install (backups in ${tilde(ctx, ctx.backupDir)}; ${saved.length} saved).`
   return { status: 'ok', message, warnings }

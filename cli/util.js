@@ -159,6 +159,13 @@ export function entry(path) {
 
 export const exists = (path) => existsSync(path)
 
+/** Renames `path` to a sibling that marks it as removed. One atomic step; undo with renameSync(returned, path). */
+export function quarantine(path) {
+  const moved = `${path}.handoff-removed-${process.pid}-${Date.now()}`
+  renameSync(path, moved)
+  return moved
+}
+
 /** Copies a file's contents (through a link) into this run's backup folder. */
 export function backupContents(ctx, path, label = basename(path)) {
   mkdirSync(ctx.backupDir, { recursive: true })

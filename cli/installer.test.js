@@ -28,7 +28,10 @@ if (process.env.FAKE_FAIL === name || (process.env.FAKE_FAIL_ON && (name + ' ' +
 `
 
 const sandboxes = []
-after(() => sandboxes.forEach((dir) => rmSync(dir, { recursive: true, force: true })))
+after(() => sandboxes.forEach((dir) => {
+  spawnSync('chmod', ['-R', 'u+rwx', dir]) // a test may leave a locked folder behind, and so may its backup copy
+  rmSync(dir, { recursive: true, force: true })
+}))
 
 function sandbox({ binaries = ['claude', 'codex', 'opencode'] } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'handoff-test-'))
@@ -439,6 +442,73 @@ describe('rollback when cleanup of the old copy fails', () => {
     sb.write('.claude/plugins/known_marketplaces.json', claudeMarketplaces(sb))
     sb.run(['--harness', 'claude', '--switch-claude', '-y'], { FAKE_FAIL_ON: 'claude plugin uninstall handoff@kha-marketplace' })
     assert.equal(sb.calls().some((c) => c === 'claude plugin uninstall handoff@handoff' || c.includes('marketplace remove')), false)
+  })
+})
+
+describe('a real legacy hooks folder', () => {
+  const dir = (sb) => sb.path('.codex/hooks/context-handoff')
+  /** A folder with a script and a locked subfolder: deleting it in place fails halfway. */
+  const seed = (sb) => {
+    sb.write('.codex/hooks/context-handoff/context_handoff.py', '# old hook\n')
+    sb.write('.codex/hooks/context-handoff/zz-locked/keep.txt', 'keep\n')
+    chmodSync(sb.path('.codex/hooks/context-handoff/zz-locked'), 0o555)
+  }
+  const unlock = (sb) => {
+    for (const name of readdirSync(sb.path('.codex/hooks'))) {
+      const locked = join(sb.path('.codex/hooks'), name, 'zz-locked')
+      if (existsSync(locked)) chmodSync(locked, 0o755)
+    }
+  }
+
+  test('a failure after the removal step restores the whole folder and removes the new copy', unlessRoot, () => {
+    const sb = sandbox()
+    seed(sb)
+    sb.write('.codex/hooks.json', { hooks: { Stop: [{ hooks: [oldHook('stop')] }] } })
+    chmodSync(sb.path('.codex'), 0o555) // the hooks.json edit, which comes after the folder is moved aside, fails
+    let result
+    try {
+      result = sb.run(['--harness', 'codex', '-y'])
+    } finally {
+      chmodSync(sb.path('.codex'), 0o755)
+    }
+    try {
+      assert.equal(result.code, 1)
+      assert.match(result.out, /Rolled back: .*restored .*context-handoff.*removed handoff@handoff/)
+      assert.equal(readFileSync(join(dir(sb), 'context_handoff.py'), 'utf8'), '# old hook\n')
+      assert.equal(readFileSync(join(dir(sb), 'zz-locked', 'keep.txt'), 'utf8'), 'keep\n')
+      assert.deepEqual(readdirSync(sb.path('.codex/hooks')), ['context-handoff'])
+      assert.deepEqual(sb.calls().slice(-2), ['codex plugin remove handoff@handoff', 'codex plugin marketplace remove handoff'])
+    } finally {
+      unlock(sb)
+    }
+  })
+
+  test('on success the old folder is gone from its place; if its copy cannot be deleted that is a warning with the path', unlessRoot, () => {
+    const sb = sandbox()
+    seed(sb)
+    let result
+    try {
+      result = sb.run(['--harness', 'codex', '-y'])
+      assert.equal(result.code, 0, result.out)
+      assert.equal(existsSync(dir(sb)), false)
+      assert.match(result.out, /could not be deleted .* Delete .*context-handoff\.handoff-removed-/)
+      const [left] = readdirSync(sb.path('.codex/hooks'))
+      assert.match(left, /^context-handoff\.handoff-removed-/)
+      // The delete got as far as the locked subfolder; what is left is named in the warning, not in the old place.
+      assert.equal(readFileSync(join(sb.path('.codex/hooks'), left, 'zz-locked', 'keep.txt'), 'utf8'), 'keep\n')
+      // The backup taken before the install holds the whole folder.
+      const [run] = readdirSync(sb.path('.handoff/backups'))
+      assert.equal(readFileSync(join(sb.path('.handoff/backups'), run, 'codex-hooks-context-handoff', 'context_handoff.py'), 'utf8'), '# old hook\n')
+    } finally {
+      unlock(sb)
+    }
+  })
+
+  test('on success with nothing locked, the moved-aside copy is deleted', () => {
+    const sb = sandbox()
+    sb.write('.codex/hooks/context-handoff/context_handoff.py', '# old hook\n')
+    assert.equal(sb.run(['--harness', 'codex', '-y']).code, 0)
+    assert.deepEqual(readdirSync(sb.path('.codex/hooks')), [])
   })
 })
 
