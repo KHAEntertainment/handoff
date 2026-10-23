@@ -54,8 +54,14 @@ def config_limit():
     try:
         import tomllib
     except ImportError:
-        found = re.search(rb'^\s*model_auto_compact_token_limit\s*=\s*(\d+)\s*(?:#.*)?$', raw, re.M)
-        return int(found.group(1)) if found else None
+        # Top-level assignments only: a key under [profiles.x] or any other table is not the one Codex reads.
+        for line in raw.decode(errors='replace').splitlines():
+            if line.lstrip().startswith('['):
+                return None
+            found = re.match(r'\s*model_auto_compact_token_limit\s*=\s*(\d+(?:_\d+)*)\s*(?:#.*)?$', line)
+            if found:
+                return int(found.group(1).replace('_', ''))
+        return None
     try:
         return tomllib.loads(raw.decode()).get('model_auto_compact_token_limit')
     except Exception:

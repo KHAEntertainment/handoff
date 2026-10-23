@@ -68,12 +68,22 @@ async function install(ctx, args, unattended) {
       results.push({ id, status: 'failed', message: `${info.label} not found on this machine` })
       continue
     }
-    const options = { switchKha: args.switchClaude, replaceLegacy: true }
+    const options = { switchKha: args.switchClaude, replaceLegacy: true, force: args.force }
     if (interactive && info.kha && !args.switchClaude) {
       options.switchKha = await ask(clack.confirm({
         message: `Claude Code already has handoff ${info.khaVersion} from kha-marketplace. Switch to the npm copy? (Never both: they would each hold /compact.)`,
         initialValue: false,
       }))
+    }
+    if (interactive && info.foreignFile && !args.force) {
+      options.force = await ask(clack.confirm({
+        message: `OpenCode: plugins/handoff.js exists and was not installed by handoff (or was edited since). Back it up and replace it? Copies go to ${tilde(ctx, ctx.backupDir)} first.`,
+        initialValue: false,
+      }))
+      if (!options.force) {
+        results.push({ id, status: 'skipped', message: 'left plugins/handoff.js alone' })
+        continue
+      }
     }
     if (interactive && info.legacy.length > 0) {
       options.replaceLegacy = await ask(clack.confirm({
@@ -123,7 +133,7 @@ function report(results, doneText) {
 
 async function uninstall(ctx, args, unattended) {
   const probes = detect(ctx)
-  const ids = (args.harness ?? HARNESS_IDS).filter((id) => probes.find((info) => info.id === id).ours)
+  const ids = (args.harness ?? HARNESS_IDS).filter((id) => probes.find((info) => info.id === id).removable)
   clack.note(probes.map((info) => describe(ctx, info)).join('\n'), 'Installs')
   if (ids.length === 0) {
     clack.outro('No handoff install of this installer found. Older manual installs and kha-marketplace are never touched here.')
@@ -152,7 +162,7 @@ async function status(ctx) {
   clack.intro(`handoff ${packageInfo().version}: status`)
   for (const info of probes) {
     const lines = [describe(ctx, info)]
-    if (info.id === 'claude' && info.kha && info.ours) lines.push('  both copies are installed: remove one, they each hold /compact')
+    for (const note of info.notes ?? []) lines.push(`  ${note}`)
     if (info.id === 'opencode' && info.ours) lines.push(`  plugins/handoff.js is ${opencode.isCurrent(ctx) ? 'the version shipped with this package' : 'different from this package version'}`)
     if (info.id === 'codex' && info.version && (info.ours || info.legacy.length > 0)) {
       const trust = await handoffHookTrust(ctx)

@@ -28,11 +28,11 @@ What it does, per harness:
 |---|---|---|
 | Claude Code | `claude plugin marketplace add ~/.handoff/marketplace`, then `claude plugin install handoff@handoff` | If `handoff@kha-marketplace` is installed, it is kept and Claude is skipped. `--switch-claude` replaces it. Never both: each would hold `/compact`. |
 | Codex | `codex plugin marketplace add ~/.handoff/marketplace`, then `codex plugin add handoff@handoff` | Approve the plugin's 5 hooks in Codex's `/hooks` screen; Codex runs none of them until then. Needs `python3` on `PATH`. |
-| OpenCode | Copies the plugin to `~/.config/opencode/plugins/handoff.js` | No `opencode.json` edit. |
+| OpenCode | Copies the plugin to `~/.config/opencode/plugins/handoff.js` | No `opencode.json` edit. A `handoff.js` it did not write (or that was edited since) is never replaced or removed unless you pass `--force`, which backs it up first. |
 
 It copies this package version's files to `~/.handoff/marketplace` first, so every harness gets the same version. To upgrade, run `npx @khaentertainment/handoff@latest` again.
 
-An older manual install is replaced after you confirm (`-y` confirms): Codex `hooks.json` entries that run `context_handoff.py` and the `~/.codex/hooks/context-handoff` link (in `$CODEX_HOME` if set), and an OpenCode `plugins/context-handoff.js` file or link. Copies go to `~/.handoff/backups/<time>/` first, and the old install is removed only after the new one succeeds.
+An older manual install is replaced after you confirm (`-y` confirms): Codex `hooks.json` entries that run `context_handoff.py` and the `~/.codex/hooks/context-handoff` link (in `$CODEX_HOME` if set), and an OpenCode `plugins/context-handoff.js` file or link. Copies go to `~/.handoff/backups/<time>/` first, and the old install is removed only after the new one succeeds; if that cleanup fails, the new install is rolled back. A marketplace named `handoff` that points somewhere other than `~/.handoff/marketplace` is never used or removed.
 
 Claude Code only, from the marketplace:
 

@@ -147,6 +147,18 @@ class Hook(unittest.TestCase):
         out = self.run_hook('post-tool', no_tomllib=True, transcript_path=self.rollout(95000))
         self.assertIn('95%', out['hookSpecificOutput']['additionalContext'])
 
+    def test_without_tomllib_accepts_underscored_integers(self):
+        with open(os.path.join(self.home, '.codex', 'config.toml'), 'w') as f:
+            f.write('model_auto_compact_token_limit = 100_000\n')
+        out = self.run_hook('post-tool', no_tomllib=True, transcript_path=self.rollout(95000))
+        self.assertIn('95%', out['hookSpecificOutput']['additionalContext'])
+
+    def test_without_tomllib_ignores_the_key_in_other_tables(self):
+        # 95000 would be 190% of the 50000 in [profiles.unused], but 53% of the 90% window that applies.
+        with open(os.path.join(self.home, '.codex', 'config.toml'), 'w') as f:
+            f.write('model = "gpt-6"\n\n[profiles.unused]\nmodel_auto_compact_token_limit = 50000\n')
+        self.assertIsNone(self.run_hook('post-tool', no_tomllib=True, transcript_path=self.rollout(95000)))
+
     def test_without_tomllib_and_no_config_the_window_is_the_limit(self):
         os.remove(os.path.join(self.home, '.codex', 'config.toml'))
         self.assertIsNone(self.run_hook('post-tool', no_tomllib=True, transcript_path=self.rollout(95000)))

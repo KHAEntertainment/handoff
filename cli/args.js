@@ -9,6 +9,7 @@ Options:
   --harness <list>   Comma-separated: claude, codex, opencode
   --all              Every harness found on this machine
   -y, --yes          No prompts; confirm replacing older installs
+  --force            Back up and replace a plugins/handoff.js that handoff did not install
   --switch-claude    Replace handoff@kha-marketplace with the npm copy (default: keep it and skip Claude)
   -v, --version      Print the version
   -h, --help         Print this help
@@ -18,7 +19,7 @@ terminal, prompts are skipped and every harness found is used. User scope only.`
 
 /** Parses argv (without node and script). Throws on anything it does not know. */
 export function parseArgs(argv) {
-  const out = { command: 'install', harness: null, all: false, yes: false, switchClaude: false, help: false, version: false }
+  const out = { command: 'install', harness: null, all: false, yes: false, switchClaude: false, force: false, help: false, version: false }
   let sawCommand = false
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
@@ -34,6 +35,7 @@ export function parseArgs(argv) {
     } else if (arg === '--all') out.all = true
     else if (arg === '-y' || arg === '--yes') out.yes = true
     else if (arg === '--switch-claude') out.switchClaude = true
+    else if (arg === '--force') out.force = true
     else if (arg === '-h' || arg === '--help') out.help = true
     else if (arg === '-v' || arg === '--version') out.version = true
     else if (!arg.startsWith('-') && !sawCommand) {

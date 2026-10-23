@@ -4,7 +4,7 @@
 //   node --test cli/installer.test.js
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { after, describe, test } from 'node:test'
@@ -24,7 +24,7 @@ if (name === 'codex' && args[0] === 'app-server') {
   })
   return
 }
-if (process.env.FAKE_FAIL === name) { console.error('boom'); process.exit(1) }
+if (process.env.FAKE_FAIL === name || (process.env.FAKE_FAIL_ON && (name + ' ' + args.join(' ')).startsWith(process.env.FAKE_FAIL_ON))) { console.error('boom'); process.exit(1) }
 `
 
 const sandboxes = []
@@ -69,6 +69,10 @@ function sandbox({ binaries = ['claude', 'codex', 'opencode'] } = {}) {
 }
 
 const stage = (sb) => sb.path('.handoff', 'marketplace')
+/** The registrations of the staged marketplace, as Claude Code and Codex record them. */
+const claudeMarketplaces = (sb) => ({ handoff: { source: { source: 'directory', path: stage(sb) } } })
+const codexConfig = (sb) => `[marketplaces.handoff]\nsource_type = "local"\nsource = "${stage(sb)}"\n\n[plugins."handoff@handoff"]\nenabled = true\n`
+const unlessRoot = process.getuid?.() === 0 ? { skip: 'root ignores directory permissions' } : {}
 const json = (path) => JSON.parse(readFileSync(path, 'utf8'))
 const oldHook = (mode) => ({ type: 'command', command: `/opt/homebrew/bin/python3 "/x/context-handoff/context_handoff.py" ${mode}`, timeout: 10 })
 const FRESH = [
@@ -171,7 +175,7 @@ describe('install', () => {
   test('upgrades from the staged marketplace when ours is already installed', () => {
     const sb = sandbox()
     sb.write('.claude/plugins/installed_plugins.json', { version: 2, plugins: { 'handoff@handoff': [{ scope: 'user', version: '0.2.0' }] } })
-    sb.write('.claude/plugins/known_marketplaces.json', { handoff: { source: {} } })
+    sb.write('.claude/plugins/known_marketplaces.json', claudeMarketplaces(sb))
     sb.run(['--harness', 'claude', '-y'])
     assert.deepEqual(sb.calls(), ['claude plugin marketplace update handoff', 'claude plugin update handoff@handoff'])
   })
@@ -196,7 +200,7 @@ describe('kha-marketplace', () => {
     assert.deepEqual(sb.calls(), [
       `claude plugin marketplace add ${stage(sb)}`,
       'claude plugin install handoff@handoff',
-      'claude plugin uninstall handoff@kha-marketplace',
+      'claude plugin uninstall handoff@kha-marketplace --scope user',
     ])
   })
 
@@ -243,7 +247,6 @@ describe('older installs', () => {
     assert.equal(code, 1)
     assert.equal(readFileSync(sb.path('.codex/hooks.json'), 'utf8'), before)
     assert.ok(lstatExists(sb.path('.codex/hooks/context-handoff')))
-    assert.equal(existsSync(sb.path('.handoff/backups')), false)
   })
 
   test('Codex: follows $CODEX_HOME', () => {
@@ -267,6 +270,228 @@ describe('older installs', () => {
   })
 })
 
+describe('OpenCode plugin ownership', () => {
+  const plugin = (sb) => sb.path('.config/opencode/plugins/handoff.js')
+  const backups = (sb) => (existsSync(sb.path('.handoff/backups')) ? readdirSync(sb.path('.handoff/backups')) : [])
+
+  test('uninstall leaves a handoff.js it did not install', () => {
+    const sb = sandbox()
+    sb.write('.config/opencode/plugins/handoff.js', 'export const Mine = () => ({})\n')
+    const { code, out } = sb.run(['uninstall', '-y'])
+    assert.equal(code, 0)
+    assert.match(out, /No handoff install of this installer found/)
+    assert.equal(readFileSync(plugin(sb), 'utf8'), 'export const Mine = () => ({})\n')
+  })
+
+  test('uninstall leaves a copy that was edited after install, and status says so', () => {
+    const sb = sandbox()
+    sb.run(['--harness', 'opencode'])
+    writeFileSync(plugin(sb), readFileSync(plugin(sb), 'utf8') + '// my tweak\n')
+    assert.match(sb.run(['status']).out, /not installed by handoff, or edited since/)
+    sb.run(['uninstall', '--harness', 'opencode', '-y'])
+    assert.match(readFileSync(plugin(sb), 'utf8'), /my tweak/)
+  })
+
+  test('install records the file, and uninstall removes the record with the file', () => {
+    const sb = sandbox()
+    sb.run(['--harness', 'opencode'])
+    assert.ok(plugin(sb) in json(sb.path('.handoff/state.json')).files)
+    sb.run(['uninstall', '--harness', 'opencode', '-y'])
+    assert.equal(existsSync(plugin(sb)), false)
+    assert.deepEqual(json(sb.path('.handoff/state.json')).files, {})
+  })
+
+  test('install will not replace an unknown handoff.js without --force, then backs it up and replaces it', () => {
+    const sb = sandbox()
+    sb.write('.config/opencode/plugins/handoff.js', 'mine\n')
+    const refused = sb.run(['--harness', 'opencode', '-y'])
+    assert.equal(refused.code, 1)
+    assert.match(refused.out, /Run with --force/)
+    assert.equal(readFileSync(plugin(sb), 'utf8'), 'mine\n')
+    assert.deepEqual(backups(sb), [])
+    const forced = sb.run(['--harness', 'opencode', '-y', '--force'])
+    assert.equal(forced.code, 0, forced.out)
+    assert.notEqual(readFileSync(plugin(sb), 'utf8'), 'mine\n')
+    const [run] = backups(sb)
+    assert.equal(readFileSync(join(sb.path('.handoff/backups'), run, 'opencode-handoff.js'), 'utf8'), 'mine\n')
+  })
+
+  test('a handoff.js link is foreign: --force replaces the link, not its target', () => {
+    const sb = sandbox()
+    sb.write('elsewhere/mine.js', 'mine\n')
+    mkdirSync(sb.path('.config/opencode/plugins'), { recursive: true })
+    symlinkSync(sb.path('elsewhere/mine.js'), plugin(sb))
+    assert.equal(sb.run(['--harness', 'opencode', '-y']).code, 1)
+    assert.equal(sb.run(['--harness', 'opencode', '-y', '--force']).code, 0)
+    assert.equal(lstatSync(plugin(sb)).isSymbolicLink(), false)
+    assert.equal(readFileSync(sb.path('elsewhere/mine.js'), 'utf8'), 'mine\n')
+  })
+
+  test('a failed write leaves the installed plugin as it was', unlessRoot, () => {
+    const sb = sandbox()
+    sb.run(['--harness', 'opencode'])
+    const before = readFileSync(plugin(sb), 'utf8')
+    const dir = sb.path('.config/opencode/plugins')
+    chmodSync(dir, 0o555)
+    try {
+      const { code } = sb.run(['--harness', 'opencode', '-y'])
+      assert.equal(code, 1)
+    } finally {
+      chmodSync(dir, 0o755)
+    }
+    assert.equal(readFileSync(plugin(sb), 'utf8'), before)
+    assert.deepEqual(readdirSync(dir), ['handoff.js'])
+  })
+})
+
+describe('config file writes', () => {
+  const legacyHooks = { hooks: { Stop: [{ hooks: [oldHook('stop')] }, { hooks: [{ type: 'command', command: 'node graft.cjs stop' }] }] } }
+
+  test('a hooks.json that is a link: the real file is rewritten and backed up, the link stays', () => {
+    const sb = sandbox()
+    sb.write('dotfiles/codex-hooks.json', legacyHooks)
+    const original = readFileSync(sb.path('dotfiles/codex-hooks.json'), 'utf8')
+    mkdirSync(sb.path('.codex'), { recursive: true })
+    symlinkSync(sb.path('dotfiles/codex-hooks.json'), sb.path('.codex/hooks.json'))
+    const { code, out } = sb.run(['--harness', 'codex', '-y'])
+    assert.equal(code, 0, out)
+    assert.equal(lstatSync(sb.path('.codex/hooks.json')).isSymbolicLink(), true)
+    assert.equal(readlinkSync(sb.path('.codex/hooks.json')), sb.path('dotfiles/codex-hooks.json'))
+    assert.deepEqual(json(sb.path('dotfiles/codex-hooks.json')), { hooks: { Stop: [{ hooks: [{ type: 'command', command: 'node graft.cjs stop' }] }] } })
+    const [run] = readdirSync(sb.path('.handoff/backups'))
+    assert.equal(readFileSync(join(sb.path('.handoff/backups'), run, 'codex-hooks.json'), 'utf8'), original)
+    assert.deepEqual(readdirSync(sb.path('dotfiles')), ['codex-hooks.json'])
+  })
+
+  test('a write that fails leaves hooks.json untouched and rolls the Codex install back', unlessRoot, () => {
+    const sb = sandbox()
+    sb.write('.codex/hooks.json', legacyHooks)
+    mkdirSync(sb.path('.codex/hooks'), { recursive: true })
+    symlinkSync('/somewhere/handoff/codex', sb.path('.codex/hooks/context-handoff'))
+    const before = readFileSync(sb.path('.codex/hooks.json'), 'utf8')
+    chmodSync(sb.path('.codex'), 0o555)
+    let result
+    try {
+      result = sb.run(['--harness', 'codex', '-y'])
+    } finally {
+      chmodSync(sb.path('.codex'), 0o755)
+    }
+    assert.equal(result.code, 1)
+    assert.match(result.out, /Rolled back: .*removed handoff@handoff.*removed marketplace handoff/)
+    assert.equal(readFileSync(sb.path('.codex/hooks.json'), 'utf8'), before)
+    assert.equal(readlinkSync(sb.path('.codex/hooks/context-handoff')), '/somewhere/handoff/codex')
+    assert.deepEqual(readdirSync(sb.path('.codex')).filter((name) => name.endsWith('.tmp')), [])
+    assert.deepEqual(sb.calls(), [
+      `codex plugin marketplace add ${stage(sb)}`,
+      'codex plugin add handoff@handoff',
+      'codex plugin remove handoff@handoff',
+      'codex plugin marketplace remove handoff',
+    ])
+  })
+})
+
+describe('rollback when cleanup of the old copy fails', () => {
+  const khaScopes = (sb, ...entries) => sb.write('.claude/plugins/installed_plugins.json', { version: 2, plugins: { 'handoff@kha-marketplace': entries } })
+
+  test('Claude: a failed kha-marketplace uninstall removes the new copy again', () => {
+    const sb = sandbox()
+    khaScopes(sb, { scope: 'user', version: '0.1.2' })
+    const { code, out } = sb.run(['--harness', 'claude', '--switch-claude', '-y'], { FAKE_FAIL_ON: 'claude plugin uninstall handoff@kha-marketplace' })
+    assert.equal(code, 1)
+    assert.match(out, /Rolled back: uninstalled handoff@handoff; removed marketplace handoff/)
+    assert.deepEqual(sb.calls(), [
+      `claude plugin marketplace add ${stage(sb)}`,
+      'claude plugin install handoff@handoff',
+      'claude plugin uninstall handoff@kha-marketplace --scope user',
+      'claude plugin uninstall handoff@handoff',
+      'claude plugin marketplace remove handoff',
+    ])
+  })
+
+  test('Claude: every scope of the old copy is uninstalled, and a later failure reinstalls the earlier ones', () => {
+    const sb = sandbox()
+    mkdirSync(sb.path('work/app'), { recursive: true })
+    khaScopes(sb, { scope: 'user', version: '0.1.2' }, { scope: 'project', version: '0.1.2', projectPath: sb.path('work/app') })
+    const ok = sb.run(['--harness', 'claude', '--switch-claude', '-y'])
+    assert.equal(ok.code, 0, ok.out)
+    assert.deepEqual(sb.calls().slice(2), [
+      'claude plugin uninstall handoff@kha-marketplace --scope user',
+      'claude plugin uninstall handoff@kha-marketplace --scope project',
+    ])
+
+    const failing = sandbox()
+    mkdirSync(failing.path('work/app'), { recursive: true })
+    khaScopes(failing, { scope: 'user', version: '0.1.2' }, { scope: 'project', version: '0.1.2', projectPath: failing.path('work/app') })
+    const { code, out } = failing.run(['--harness', 'claude', '--switch-claude', '-y'], { FAKE_FAIL_ON: 'claude plugin uninstall handoff@kha-marketplace --scope project' })
+    assert.equal(code, 1)
+    assert.match(out, /reinstalled handoff@kha-marketplace \(user scope\)/)
+    assert.deepEqual(failing.calls().slice(-4), [
+      'claude plugin uninstall handoff@kha-marketplace --scope project',
+      'claude plugin install handoff@kha-marketplace --scope user',
+      'claude plugin uninstall handoff@handoff',
+      'claude plugin marketplace remove handoff',
+    ])
+  })
+
+  test('Claude: an upgrade that fails later does not uninstall the copy that was already there', () => {
+    const sb = sandbox()
+    sb.write('.claude/plugins/installed_plugins.json', { version: 2, plugins: { 'handoff@handoff': [{ scope: 'user', version: '0.2.0' }], 'handoff@kha-marketplace': [{ scope: 'user', version: '0.1.2' }] } })
+    sb.write('.claude/plugins/known_marketplaces.json', claudeMarketplaces(sb))
+    sb.run(['--harness', 'claude', '--switch-claude', '-y'], { FAKE_FAIL_ON: 'claude plugin uninstall handoff@kha-marketplace' })
+    assert.equal(sb.calls().some((c) => c === 'claude plugin uninstall handoff@handoff' || c.includes('marketplace remove')), false)
+  })
+})
+
+describe('marketplace named handoff that is not ours', () => {
+  test('Claude: refuses without calling anything, and uninstall leaves it alone', () => {
+    const sb = sandbox()
+    sb.write('.claude/plugins/known_marketplaces.json', { handoff: { source: { source: 'github', repo: 'someone/else' } } })
+    sb.write('.claude/plugins/installed_plugins.json', { version: 2, plugins: { 'handoff@handoff': [{ scope: 'user', version: '9.9.9' }] } })
+    const { code, out } = sb.run(['--harness', 'claude', '-y'])
+    assert.equal(code, 1)
+    assert.match(out, /already registered from someone\/else/)
+    assert.deepEqual(sb.calls(), [])
+    assert.match(sb.run(['status']).out, /registered from someone\/else, not from handoff/)
+    assert.match(sb.run(['uninstall', '-y']).out, /No handoff install of this installer found/)
+    assert.deepEqual(sb.calls(), [])
+  })
+
+  test('Claude: a directory marketplace pointing somewhere else is foreign too', () => {
+    const sb = sandbox()
+    sb.write('.claude/plugins/known_marketplaces.json', { handoff: { source: { source: 'directory', path: sb.path('other') } } })
+    assert.equal(sb.run(['--harness', 'claude', '-y']).code, 1)
+    assert.deepEqual(sb.calls(), [])
+  })
+
+  test('Claude: a marketplace of ours is recognised through a different spelling of the path', () => {
+    const sb = sandbox()
+    mkdirSync(stage(sb), { recursive: true })
+    symlinkSync(stage(sb), sb.path('stage-link'))
+    sb.write('.claude/plugins/known_marketplaces.json', { handoff: { source: { source: 'directory', path: sb.path('stage-link') } } })
+    sb.run(['--harness', 'claude', '-y'])
+    assert.equal(sb.calls()[0], 'claude plugin marketplace update handoff')
+  })
+
+  test('Codex: refuses without calling anything, and uninstall leaves it alone', () => {
+    const sb = sandbox()
+    sb.write('.codex/config.toml', '[marketplaces.handoff]\nsource_type = "git"\nsource = "https://example.com/else.git"\n\n[plugins."handoff@handoff"]\nenabled = true\n')
+    const { code, out } = sb.run(['--harness', 'codex', '-y'])
+    assert.equal(code, 1)
+    assert.match(out, /already registered from https:\/\/example\.com\/else\.git/)
+    sb.run(['uninstall', '-y'])
+    assert.deepEqual(sb.calls(), [])
+  })
+
+  test('Codex: a quoted table name and a different local path are read correctly', () => {
+    const sb = sandbox()
+    sb.write('.codex/config.toml', `[marketplaces."handoff"]\nsource_type = "local"\nsource = "${sb.path('other')}"\n`)
+    assert.equal(sb.run(['--harness', 'codex', '-y']).code, 1)
+    sb.write('.codex/config.toml', `[marketplaces."handoff"]\nsource_type = "local"\nsource = "${stage(sb)}"\n`)
+    assert.equal(sb.run(['--harness', 'codex', '-y']).code, 0)
+    assert.deepEqual(sb.calls(), ['codex plugin add handoff@handoff'])
+  })
+})
+
 describe('status', () => {
   const hook = (key, trustStatus) => ({ key, command: 'python3 "$PLUGIN_ROOT/context_handoff.py" stop', trustStatus })
   const plugin = (n, trustStatus) => hook(`handoff@handoff:hooks.json:post_tool_use:${n}:0`, trustStatus)
@@ -274,7 +499,7 @@ describe('status', () => {
 
   test('reports plugin hook approval and older manual entries separately', () => {
     const sb = sandbox()
-    sb.write('.codex/config.toml', '[plugins."handoff@handoff"]\nenabled = true\n')
+    sb.write('.codex/config.toml', codexConfig(sb))
     const hooks = JSON.stringify([
       plugin(0, 'trusted'), plugin(1, 'trusted'), plugin(2, 'trusted'), plugin(3, 'untrusted'), plugin(4, 'modified'),
       manual(0, 'trusted'), manual(1, 'trusted'),
@@ -288,7 +513,7 @@ describe('status', () => {
 
   test('a fully approved plugin with no manual entries says only that', () => {
     const sb = sandbox()
-    sb.write('.codex/config.toml', '[plugins."handoff@handoff"]\nenabled = true\n')
+    sb.write('.codex/config.toml', codexConfig(sb))
     const { out } = sb.run(['status'], { FAKE_HOOKS: JSON.stringify([plugin(0, 'trusted'), plugin(1, 'trusted')]) })
     assert.match(out, /plugin: 2 of 2 approved\n/)
     assert.doesNotMatch(out, /manual hooks/)
@@ -300,8 +525,8 @@ describe('uninstall', () => {
     const sb = sandbox()
     sb.run(['-y'])
     sb.write('.claude/plugins/installed_plugins.json', { version: 2, plugins: { 'handoff@handoff': [{ version: '0.2.0' }], 'handoff@kha-marketplace': [{ version: '0.1.2' }] } })
-    sb.write('.claude/plugins/known_marketplaces.json', { handoff: {} })
-    sb.write('.codex/config.toml', '[marketplaces.handoff]\nsource = "x"\n\n[plugins."handoff@handoff"]\nenabled = true\n')
+    sb.write('.claude/plugins/known_marketplaces.json', claudeMarketplaces(sb))
+    sb.write('.codex/config.toml', codexConfig(sb))
     writeFileSync(sb.path('calls.jsonl'), '')
     const { code, out } = sb.run(['uninstall', '-y'])
     assert.equal(code, 0, out)
@@ -319,7 +544,7 @@ describe('uninstall', () => {
     const sb = sandbox()
     sb.run(['-y'])
     sb.write('.claude/plugins/installed_plugins.json', { version: 2, plugins: { 'handoff@handoff': [{ version: '0.2.0' }] } })
-    sb.write('.codex/config.toml', '[plugins."handoff@handoff"]\nenabled = true\n')
+    sb.write('.codex/config.toml', codexConfig(sb))
     writeFileSync(sb.path('calls.jsonl'), '')
     sb.run(['uninstall', '--harness', 'opencode', '-y'])
     assert.deepEqual(sb.calls(), [])
