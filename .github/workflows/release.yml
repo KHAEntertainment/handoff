@@ -38,10 +38,14 @@ jobs:
         run: |
           node -e '
             const tag = process.env.TAG.replace(/^v/, "")
-            const pkg = require("./package.json").version
-            const plugin = require("./.claude-plugin/plugin.json").version
-            if (tag !== pkg || tag !== plugin) {
-              console.error(`tag ${tag}, package.json ${pkg}, .claude-plugin/plugin.json ${plugin}: they must match`)
+            const versions = {
+              "package.json": require("./package.json").version,
+              ".claude-plugin/plugin.json": require("./.claude-plugin/plugin.json").version,
+              "codex/.codex-plugin/plugin.json": require("./codex/.codex-plugin/plugin.json").version,
+            }
+            const stale = Object.entries(versions).filter(([, v]) => v !== tag)
+            if (stale.length) {
+              console.error(`tag ${tag} must match every version field: ${Object.entries(versions).map(([f, v]) => `${f} ${v}`).join(", ")}`)
               process.exit(1)
             }'
       - run: npm ci
@@ -77,7 +81,16 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         run: |
           version=$(node -p 'require("./package.json").version')
-          latest=$(npm view @khaentertainment/handoff dist-tags.latest 2>/dev/null || true)
+          # A package that is not on npm yet (404) has no latest. Any other lookup failure stops the release.
+          if latest=$(npm view @khaentertainment/handoff dist-tags.latest 2>lookup.err); then
+            :
+          elif grep -q 'E404' lookup.err; then
+            latest=''
+          else
+            cat lookup.err >&2
+            echo 'could not read the latest dist-tag from npm; not staging' >&2
+            exit 1
+          fi
           # A pre-release, or a version below the latest, goes under `next` so it never takes `latest`.
           tag=latest
           if [[ "$version" == *-* ]]; then

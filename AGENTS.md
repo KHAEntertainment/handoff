@@ -83,7 +83,7 @@ A version bump merged to `main` does not publish. The tag is the release. A pre-
 
 ### What the workflow does on a tag
 
-1. **`test` job.** Checks that the tag, without its `v`, equals the version in `package.json` and in `.claude-plugin/plugin.json`. If either differs, the job fails. Then it runs the installer and Codex tests.
+1. **`test` job.** Checks that the tag, without its `v`, equals the version in `package.json`, `.claude-plugin/plugin.json` and `codex/.codex-plugin/plugin.json`. If any differs, the job fails. Then it runs the installer and Codex tests.
 2. **`publish` job**, which runs only if `test` passes.
    - If `@khaentertainment/handoff@<version>` already exists on npm, it does nothing.
    - Otherwise it runs `npm stage publish --access public --tag <tag>`. The tag is `next` for a pre-release, or for a version lower than the latest on npm. It is `latest` otherwise.

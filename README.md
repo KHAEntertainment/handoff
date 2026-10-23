@@ -134,7 +134,7 @@ The message prefix `[context-handoff]` in prompts and notes is the plugin's orig
 1. Set the same version in `package.json`, `.claude-plugin/plugin.json` and `codex/.codex-plugin/plugin.json`, and turn the CHANGELOG's `## Unreleased` into `## <version>`.
 2. Merge the change to `main` through a pull request, as for any change.
 3. Tag the merged commit on `main` and push the tag: `git tag v<version>`, then `git push origin v<version>`. The tag must point at the commit with the new versions, or the tag check fails.
-4. `.github/workflows/release.yml` checks that the tag matches the versions in `package.json` and `.claude-plugin/plugin.json`, runs the tests, and stages the package on npm with trusted publishing (no npm token). Pre-release tags such as `v0.3.0-rc.1` are staged under the `next` dist-tag, so they do not replace `latest`.
+4. `.github/workflows/release.yml` checks that the tag matches the versions in `package.json`, `.claude-plugin/plugin.json` and `codex/.codex-plugin/plugin.json`, runs the tests, and stages the package on npm with trusted publishing (no npm token). Pre-release tags such as `v0.3.0-rc.1` are staged under the `next` dist-tag, so they do not replace `latest`.
 5. Approve the staged version with 2FA: `npm stage list @khaentertainment/handoff`, then `npm stage approve <id>`, or the Staged Packages tab on npmjs.com. Nothing is public until you approve it.
 6. Create the GitHub release, then bump the `handoff` pin in [kha-marketplace](https://github.com/KHAEntertainment/marketplace).
 
