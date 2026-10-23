@@ -83,25 +83,57 @@ def rollout(transcript, sid):
     return max(found, key=os.path.getmtime) if found else None
 
 
+def since_compaction(raw):
+    """The rollout from its newest compacted record on, or all of it. Inside a JSON string the marker is escaped, so it cannot match."""
+    end = len(raw)
+    while True:
+        at = raw.rfind(b'"compacted"', 0, end)
+        if at < 0:
+            return raw
+        start = raw.rfind(b'\n', 0, at) + 1
+        stop = raw.find(b'\n', at)
+        try:
+            if json.loads(raw[start:stop if stop >= 0 else len(raw)])['type'] == 'compacted':
+                return raw[start:]
+        except Exception:
+            pass
+        end = start
+
+
 def fill(transcript):
-    """The newest token_count record: the tokens the last request was answered over, and the window."""
+    """The tokens Codex counts toward its auto-compact limit, and the window.
+
+    The newest token_count record gives the tokens the last request was billed for. Codex's own count
+    also takes in the reasoning of earlier turns since the last compaction, which the API no longer
+    bills, so that is added from its encrypted size at 4 bytes a token. On session 01a16a09 this ran
+    about 50% over Codex's figure, which only makes the ask come early.
+    """
     if not transcript:
         return None
-    size = os.path.getsize(transcript)
     with open(transcript, 'rb') as f:
-        f.seek(max(0, size - 3_000_000))
-        lines = f.read().decode('utf-8', 'ignore').splitlines()
-    for line in reversed(lines):
-        if '"token_count"' not in line:
+        raw = f.read()
+    usage = window = turn = None
+    reasoning = {}
+    for line in since_compaction(raw).splitlines():
+        if b'"token_count"' not in line and b'"task_started"' not in line and b'"reasoning"' not in line:
             continue
         try:
-            info = json.loads(line)['payload']['info']
+            payload = json.loads(line)['payload']
         except Exception:
             continue
-        if not info:
-            continue
-        return info['last_token_usage']['total_tokens'], info.get('model_context_window')
-    return None
+        kind = payload.get('type')
+        if kind == 'task_started':
+            turn = payload.get('turn_id')
+        elif kind == 'reasoning':
+            reasoning[turn] = reasoning.get(turn, 0) + len(payload.get('encrypted_content') or '')
+        elif kind == 'token_count' and payload.get('info'):
+            usage = payload['info']['last_token_usage']['total_tokens']
+            window = payload['info'].get('model_context_window')
+    if usage is None:
+        return None
+    # The current turn's reasoning is still sent back, so the last request already billed it.
+    earlier = sum(size for t, size in reasoning.items() if t != turn)
+    return usage + earlier // 4, window
 
 
 def locate(st, sid):

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Codex: the threshold check now counts the reasoning of earlier turns since the last compaction, at 4 bytes of encrypted content a token. Codex counts that reasoning toward `model_auto_compact_token_limit`, but the API no longer bills it, so the billed tokens alone ran 4–22% under Codex's figure and the handoff was never asked for: session `01a16a09` auto-compacted at 477,489 billed tokens (82% of 580,000) while Codex counted 583,096. Replayed on that session, the request now comes about 10 minutes before the compaction. The estimate runs high, so the request can come early but not late. The rollout is now read from its newest `compacted` record rather than its last 3 MB.
+
 ## 0.2.0
 
 - Installer: `npx @khaentertainment/handoff` (new npm package, version 0.2.0) detects Claude Code, Codex and OpenCode and installs the handoff for all or some of them (`install`, `status`, `uninstall`; `--harness`, `--all`, `-y`). It stages this version's files in `~/.handoff/marketplace`, a local marketplace for Claude Code and Codex, and copies the OpenCode plugin to `~/.config/opencode/plugins/handoff.js`. A `handoff@kha-marketplace` install is kept by default (`--switch-claude` replaces it): never both. Earlier manual Codex and OpenCode installs are replaced after a confirm, with backups in `~/.handoff/backups/`. `status` reads Codex hook approval through `codex app-server`.

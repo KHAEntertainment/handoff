@@ -42,14 +42,35 @@ class Hook(unittest.TestCase):
         with open(self.handoff(), 'w') as f:
             f.write('# Handoff\n' + 'state and next steps\n' * 20)
 
-    def rollout(self, tokens, where=None):
+    def rollout(self, tokens, where=None, before=(), window=200000):
         where = where or os.path.join(self.home, '.codex', 'sessions', '2026', '10', '22')
         os.makedirs(where, exist_ok=True)
         path = os.path.join(where, f'rollout-2026-10-22T00-00-00-{SID}.jsonl')
-        info = {'last_token_usage': {'total_tokens': tokens}, 'model_context_window': 200000}
+        info = {'last_token_usage': {'total_tokens': tokens}, 'model_context_window': window}
         with open(path, 'w') as f:
-            f.write(json.dumps({'type': 'event_msg', 'payload': {'type': 'token_count', 'info': info}}) + '\n')
+            for record in [*before, {'type': 'event_msg', 'payload': {'type': 'token_count', 'info': info}}]:
+                f.write(json.dumps(record, separators=(',', ':')) + '\n')
         return path
+
+    @staticmethod
+    def turn(turn_id, *reasoning_bytes):
+        """A turn's start and its reasoning items, as Codex writes them to the rollout."""
+        return [{'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': turn_id}},
+                *({'type': 'response_item', 'payload': {'type': 'reasoning', 'summary': [], 'encrypted_content': 'g' * size}}
+                  for size in reasoning_bytes)]
+
+    def session_01a16a09(self, in_earlier_turns=True):
+        """Session 01a16a09 at 15:57:55 on 2026-10-23, one request before Codex auto-compacted it.
+
+        The API billed 477,489 tokens, 82% of the 580,000 limit, so the hook never asked. Codex's own
+        count was 583,096: it also takes in the reasoning of the 14 earlier turns, 635,508 bytes.
+        """
+        with open(os.path.join(self.home, '.codex', 'config.toml'), 'w') as f:
+            f.write('model_auto_compact_token_limit = 580000\n')
+        sizes = [2508, 54948, 8156, 35512, 18280, 53960, 76500, 168432, 31628, 38404, 46696, 4344, 34700, 61440]
+        before = ([record for n, size in enumerate(sizes) for record in self.turn(f't{n}', size)] + self.turn('now')
+                  if in_earlier_turns else self.turn('now', *sizes))
+        return self.rollout(477489, before=before, window=828400)
 
     # PreCompact
 
@@ -164,6 +185,24 @@ class Hook(unittest.TestCase):
         self.assertIsNone(self.run_hook('post-tool', no_tomllib=True, transcript_path=self.rollout(95000)))
         out = self.run_hook('post-tool', no_tomllib=True, transcript_path=self.rollout(175000))
         self.assertIn('97%', out['hookSpecificOutput']['additionalContext'])
+
+    def test_earlier_turns_reasoning_counts_toward_the_limit(self):
+        # 477,489 + 635,508 / 4 = 636,366: 110% of 580,000.
+        out = self.run_hook('post-tool', transcript_path=self.session_01a16a09())
+        self.assertIn('110% of', out['hookSpecificOutput']['additionalContext'])
+        self.assertIn('636,366 of 580,000', out['hookSpecificOutput']['additionalContext'])
+
+    def test_current_turns_reasoning_is_not_added_again(self):
+        # Same session, but if all 635,508 bytes were this turn's, the 477,489 billed already holds them.
+        self.assertIsNone(self.run_hook('post-tool', transcript_path=self.session_01a16a09(in_earlier_turns=False)))
+        self.assertEqual(self.state()['phase'], 'armed')
+
+    def test_reasoning_before_a_compaction_is_not_added(self):
+        compacted = {'type': 'compacted', 'payload': {'message': '', 'replacement_history': [{'type': 'message', 'role': 'user', 'content': []}]}}
+        before = self.turn('t0', 400000) + self.turn('t1', 400000) + [compacted] + self.turn('t2', 4000) + self.turn('t3')
+        self.assertIsNone(self.run_hook('post-tool', transcript_path=self.rollout(50000, before=before)))
+        # 50,000 + 4,000 / 4 = 51,000: only t2, which came after the compaction, counts.
+        self.assertIn('96%', self.run_hook('post-tool', transcript_path=self.rollout(95000, before=before))['hookSpecificOutput']['additionalContext'])
 
     def test_below_threshold_stays_armed(self):
         self.assertIsNone(self.run_hook('post-tool', transcript_path=self.rollout(50000)))
