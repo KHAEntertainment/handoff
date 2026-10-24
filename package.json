@@ -1,6 +1,6 @@
 {
   "name": "@khaentertainment/handoff",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Write a resume handoff before compaction, compact, then resume from it. Installer for Claude Code, Codex and OpenCode.",
   "license": "MIT",
   "homepage": "https://github.com/KHAEntertainment/handoff",
