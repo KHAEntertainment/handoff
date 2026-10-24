@@ -53,11 +53,19 @@ class Hook(unittest.TestCase):
         return path
 
     @staticmethod
-    def turn(turn_id, *reasoning_bytes):
-        """A turn's start and its reasoning items, as Codex writes them to the rollout."""
-        return [{'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': turn_id}},
-                *({'type': 'response_item', 'payload': {'type': 'reasoning', 'summary': [], 'encrypted_content': 'g' * size}}
-                  for size in reasoning_bytes)]
+    def message(text, role='user'):
+        return {'type': 'response_item', 'payload': {'type': 'message', 'role': role, 'content': [{'type': 'input_text', 'text': text}]}}
+
+    @classmethod
+    def reasoning(cls, *sizes):
+        return [{'type': 'response_item', 'payload': {'type': 'reasoning', 'summary': [], 'encrypted_content': 'g' * size}} for size in sizes]
+
+    @classmethod
+    def turn(cls, prompt, *reasoning_bytes):
+        """A turn as Codex writes it to the rollout: its start, injected context, the prompt, then the reasoning."""
+        return [{'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': prompt}},
+                cls.message('# AGENTS.md instructions\n\n<INSTRUCTIONS>...</INSTRUCTIONS>'),
+                cls.message(prompt), *cls.reasoning(*reasoning_bytes)]
 
     def session_01a16a09(self, in_earlier_turns=True):
         """Session 01a16a09 at 15:57:55 on 2026-10-23, one request before Codex auto-compacted it.
@@ -196,6 +204,19 @@ class Hook(unittest.TestCase):
         # Same session, but if all 635,508 bytes were this turn's, the 477,489 billed already holds them.
         self.assertIsNone(self.run_hook('post-tool', transcript_path=self.session_01a16a09(in_earlier_turns=False)))
         self.assertEqual(self.state()['phase'], 'armed')
+
+    def test_steering_within_a_task_moves_the_boundary(self):
+        # A message sent while a task runs starts no new task, but Codex counts the reasoning before it:
+        # 80,000 + 400,000 / 4 = 180,000.
+        before = self.turn('task A', 400000) + [self.message('steer: use the other file')]
+        out = self.run_hook('post-tool', transcript_path=self.rollout(80000, before=before))
+        self.assertIn('180%', out['hookSpecificOutput']['additionalContext'])
+
+    def test_injected_context_is_not_a_boundary(self):
+        # Context Codex injects after the prompt leaves the prompt's own reasoning billed: 50,000 is 50%.
+        before = self.turn('task A', 400000) + [self.message('<environment_context>\n</environment_context>'),
+                                                self.message('# AGENTS.md instructions\n\n<INSTRUCTIONS>')]
+        self.assertIsNone(self.run_hook('post-tool', transcript_path=self.rollout(50000, before=before)))
 
     def test_reasoning_before_a_compaction_is_not_added(self):
         compacted = {'type': 'compacted', 'payload': {'message': '', 'replacement_history': [{'type': 'message', 'role': 'user', 'content': []}]}}

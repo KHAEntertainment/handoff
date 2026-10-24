@@ -100,39 +100,51 @@ def since_compaction(raw):
         end = start
 
 
+def instruction(payload):
+    """An instruction boundary as Codex's is_user_turn_boundary sees it: an agent message, or a user
+    message that is not injected context. Context fragments are tag-wrapped, or the AGENTS.md block;
+    any user text that looks like one is treated as context, which can only make the count higher."""
+    if payload.get('type') == 'agent_message':
+        return True
+    if payload.get('type') != 'message' or payload.get('role') != 'user':
+        return False
+    texts = [part.get('text') or '' for part in payload.get('content') or [] if isinstance(part, dict)]
+    return not any(t.lstrip().startswith(('<', '# AGENTS.md instructions')) for t in texts)
+
+
 def fill(transcript):
     """The tokens Codex counts toward its auto-compact limit, and the window.
 
     The newest token_count record gives the tokens the last request was billed for. Codex's own count
-    also takes in the reasoning of earlier turns since the last compaction, which the API no longer
-    bills, so that is added from its encrypted size at 4 bytes a token. On session 01a16a09 this ran
-    about 50% over Codex's figure, which only makes the ask come early.
+    (get_total_token_usage in codex-rs context_manager/history.rs) also takes in the reasoning from
+    before the newest instruction since the last compaction, which the API no longer bills, so that
+    is added from its encrypted size at 4 bytes a token. On session 01a16a09 this ran about 50% over
+    Codex's figure, which only makes the ask come early.
     """
     if not transcript:
         return None
     with open(transcript, 'rb') as f:
         raw = f.read()
-    usage = window = turn = None
-    reasoning = {}
+    usage = window = None
+    reasoning = earlier = 0
     for line in since_compaction(raw).splitlines():
-        if b'"token_count"' not in line and b'"task_started"' not in line and b'"reasoning"' not in line:
+        if not any(key in line for key in (b'"token_count"', b'"reasoning"', b'"message"', b'"agent_message"')):
             continue
         try:
             payload = json.loads(line)['payload']
         except Exception:
             continue
         kind = payload.get('type')
-        if kind == 'task_started':
-            turn = payload.get('turn_id')
-        elif kind == 'reasoning':
-            reasoning[turn] = reasoning.get(turn, 0) + len(payload.get('encrypted_content') or '')
+        if kind == 'reasoning':
+            reasoning += len(payload.get('encrypted_content') or '')
         elif kind == 'token_count' and payload.get('info'):
             usage = payload['info']['last_token_usage']['total_tokens']
             window = payload['info'].get('model_context_window')
+        elif instruction(payload):
+            # Reasoning after the newest instruction is still sent back, so the last request billed it.
+            earlier = reasoning
     if usage is None:
         return None
-    # The current turn's reasoning is still sent back, so the last request already billed it.
-    earlier = sum(size for t, size in reasoning.items() if t != turn)
     return usage + earlier // 4, window
 
 
