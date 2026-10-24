@@ -83,25 +83,100 @@ def rollout(transcript, sid):
     return max(found, key=os.path.getmtime) if found else None
 
 
+def since_compaction(raw):
+    """The rollout from its newest compacted record on, or all of it. Inside a JSON string the marker is escaped, so it cannot match."""
+    end = len(raw)
+    while True:
+        at = raw.rfind(b'"compacted"', 0, end)
+        if at < 0:
+            return raw
+        start = raw.rfind(b'\n', 0, at) + 1
+        stop = raw.find(b'\n', at)
+        try:
+            if json.loads(raw[start:stop if stop >= 0 else len(raw)])['type'] == 'compacted':
+                return raw[start:]
+        except Exception:
+            pass
+        end = start
+
+
+# Context Codex injects as user messages (codex-rs core/src/context, 0.163.0), by start and end marker.
+CONTEXT_MARKERS = (
+    ('# AGENTS.md instructions', '</INSTRUCTIONS>'),
+    ('<environment_context>', '</environment_context>'),
+    ('<skill>', '</skill>'),
+    ('<hook_prompt', '</hook_prompt>'),
+    ('<user_shell_command>', '</user_shell_command>'),
+    ('<turn_aborted>', '</turn_aborted>'),
+    ('<subagent_notification>', '</subagent_notification>'),
+    ('<agent_message_board_notification>', '</agent_message_board_notification>'),
+    # <codex_internal_context source="..."> and <goal_context> have stricter matchers of their own
+    # (internal_model_context.rs), so they are left out: as boundaries they can only overcount.
+)
+
+
+def injected(text):
+    text = text.strip().lower()
+    return any(text.startswith(start.lower()) and text.endswith(end.lower()) for start, end in CONTEXT_MARKERS)
+
+
+def instruction(payload):
+    """An instruction boundary as Codex's is_user_turn_boundary sees it: an agent message, a user
+    message that is not injected context, or an inter-agent instruction from the assistant.
+
+    Each boundary adds the reasoning before it to the count, so a missed one undercounts. Any user
+    message is a boundary unless one of its parts carries a known context marker pair: a context
+    fragment missing from CONTEXT_MARKERS only makes the count higher."""
+    if payload.get('type') == 'agent_message':
+        return True
+    if payload.get('type') != 'message':
+        return False
+    parts = [part for part in payload.get('content') or [] if isinstance(part, dict)]
+    if payload.get('role') == 'user':
+        return not any(injected(part.get('text') or '') for part in parts if part.get('type') == 'input_text')
+    if payload.get('role') == 'assistant' and len(parts) == 1:
+        try:
+            sent = json.loads(parts[0].get('text') or '')
+        except Exception:
+            return False
+        return isinstance(sent, dict) and {'author', 'recipient', 'content', 'trigger_turn'} <= sent.keys()
+    return False
+
+
 def fill(transcript):
-    """The newest token_count record: the tokens the last request was answered over, and the window."""
+    """The tokens Codex counts toward its auto-compact limit, and the window.
+
+    The newest token_count record gives the tokens the last request was billed for. Codex's own count
+    (get_total_token_usage in codex-rs context_manager/history.rs) also takes in the reasoning from
+    before the newest instruction since the last compaction, which the API no longer bills, so that
+    is added from its encrypted size at 4 bytes a token. On session 01a16a09 this ran about 50% over
+    Codex's figure, which only makes the ask come early.
+    """
     if not transcript:
         return None
-    size = os.path.getsize(transcript)
     with open(transcript, 'rb') as f:
-        f.seek(max(0, size - 3_000_000))
-        lines = f.read().decode('utf-8', 'ignore').splitlines()
-    for line in reversed(lines):
-        if '"token_count"' not in line:
+        raw = f.read()
+    usage = window = None
+    reasoning = earlier = 0
+    for line in since_compaction(raw).splitlines():
+        if not any(key in line for key in (b'"token_count"', b'"reasoning"', b'"message"', b'"agent_message"')):
             continue
         try:
-            info = json.loads(line)['payload']['info']
+            payload = json.loads(line)['payload']
         except Exception:
             continue
-        if not info:
-            continue
-        return info['last_token_usage']['total_tokens'], info.get('model_context_window')
-    return None
+        kind = payload.get('type')
+        if kind == 'reasoning':
+            reasoning += len(payload.get('encrypted_content') or '')
+        elif kind == 'token_count' and payload.get('info'):
+            usage = payload['info']['last_token_usage']['total_tokens']
+            window = payload['info'].get('model_context_window')
+        elif instruction(payload):
+            # Reasoning after the newest instruction is still sent back, so the last request billed it.
+            earlier = reasoning
+    if usage is None:
+        return None
+    return usage + earlier // 4, window
 
 
 def locate(st, sid):
