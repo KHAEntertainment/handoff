@@ -100,16 +100,47 @@ def since_compaction(raw):
         end = start
 
 
+# Context Codex injects as user messages (codex-rs core/src/context, 0.163.0), by start and end marker.
+CONTEXT_MARKERS = (
+    ('# AGENTS.md instructions', '</INSTRUCTIONS>'),
+    ('<environment_context>', '</environment_context>'),
+    ('<skill>', '</skill>'),
+    ('<hook_prompt', '</hook_prompt>'),
+    ('<user_shell_command>', '</user_shell_command>'),
+    ('<turn_aborted>', '</turn_aborted>'),
+    ('<subagent_notification>', '</subagent_notification>'),
+    ('<agent_message_board_notification>', '</agent_message_board_notification>'),
+    ('<codex_internal_context', '</codex_internal_context>'),
+    ('<goal_context>', '</goal_context>'),
+)
+
+
+def injected(text):
+    text = text.strip().lower()
+    return any(text.startswith(start.lower()) and text.endswith(end.lower()) for start, end in CONTEXT_MARKERS)
+
+
 def instruction(payload):
-    """An instruction boundary as Codex's is_user_turn_boundary sees it: an agent message, or a user
-    message that is not injected context. Context fragments are tag-wrapped, or the AGENTS.md block;
-    any user text that looks like one is treated as context, which can only make the count higher."""
+    """An instruction boundary as Codex's is_user_turn_boundary sees it: an agent message, a user
+    message that is not injected context, or an inter-agent instruction from the assistant.
+
+    Each boundary adds the reasoning before it to the count, so a missed one undercounts. Any user
+    message is a boundary unless one of its parts carries a known context marker pair: a context
+    fragment missing from CONTEXT_MARKERS only makes the count higher."""
     if payload.get('type') == 'agent_message':
         return True
-    if payload.get('type') != 'message' or payload.get('role') != 'user':
+    if payload.get('type') != 'message':
         return False
-    texts = [part.get('text') or '' for part in payload.get('content') or [] if isinstance(part, dict)]
-    return not any(t.lstrip().startswith(('<', '# AGENTS.md instructions')) for t in texts)
+    parts = [part for part in payload.get('content') or [] if isinstance(part, dict)]
+    if payload.get('role') == 'user':
+        return not any(injected(part.get('text') or '') for part in parts if part.get('type') == 'input_text')
+    if payload.get('role') == 'assistant' and len(parts) == 1:
+        try:
+            sent = json.loads(parts[0].get('text') or '')
+        except Exception:
+            return False
+        return isinstance(sent, dict) and {'author', 'recipient', 'content', 'trigger_turn'} <= sent.keys()
+    return False
 
 
 def fill(transcript):

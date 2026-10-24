@@ -212,10 +212,29 @@ class Hook(unittest.TestCase):
         out = self.run_hook('post-tool', transcript_path=self.rollout(80000, before=before))
         self.assertIn('180%', out['hookSpecificOutput']['additionalContext'])
 
-    def test_injected_context_is_not_a_boundary(self):
+    def test_tagged_instructions_are_boundaries(self):
+        # Real instructions can start with a tag: a Traycer resume prompt, or steering wrapped in XML.
+        for text in ('<task>use the other file</task>',
+                     '# AGENTS.md instructions are out of date, fix them first',
+                     '<previous_session_context>\nnotes\n</previous_session_context>\n<current_user_query>go</current_user_query>'):
+            with self.subTest(text=text[:20]):
+                self.tearDown(); self.setUp()
+                before = self.turn('task A', 400000) + [self.message(text)]
+                out = self.run_hook('post-tool', transcript_path=self.rollout(80000, before=before))
+                self.assertIn('180%', out['hookSpecificOutput']['additionalContext'])
+
+    def test_inter_agent_instruction_is_a_boundary(self):
+        sent = json.dumps({'author': '/root', 'recipient': '/root/worker', 'other_recipients': [], 'content': 'steer', 'trigger_turn': False})
+        before = self.turn('task A', 400000) + [self.message(sent, role='assistant')]
+        out = self.run_hook('post-tool', transcript_path=self.rollout(80000, before=before))
+        self.assertIn('180%', out['hookSpecificOutput']['additionalContext'])
+
+    def test_injected_context_and_plain_assistant_text_are_not_boundaries(self):
         # Context Codex injects after the prompt leaves the prompt's own reasoning billed: 50,000 is 50%.
-        before = self.turn('task A', 400000) + [self.message('<environment_context>\n</environment_context>'),
-                                                self.message('# AGENTS.md instructions\n\n<INSTRUCTIONS>')]
+        before = self.turn('task A', 400000) + [self.message('<ENVIRONMENT_CONTEXT>\n</environment_context>'),
+                                                self.message('# AGENTS.md instructions\n\n<INSTRUCTIONS>\n</INSTRUCTIONS>'),
+                                                self.message('Checking the other file next.', role='assistant'),
+                                                self.message('{"risk_level": "low"}', role='assistant')]
         self.assertIsNone(self.run_hook('post-tool', transcript_path=self.rollout(50000, before=before)))
 
     def test_reasoning_before_a_compaction_is_not_added(self):
