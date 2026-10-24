@@ -1,6 +1,6 @@
 {
   "name": "handoff",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Asks the agent for a resume handoff near Codex's auto-compact limit, holds a manual /compact once until it exists, and points the agent back at it afterwards.",
   "author": { "name": "KHA Entertainment" },
   "homepage": "https://github.com/KHAEntertainment/handoff",

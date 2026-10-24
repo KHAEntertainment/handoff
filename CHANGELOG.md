@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.2.1
 
+- Release: a pushed `v*` tag now tests the package and stages it on npm through trusted publishing (`.github/workflows/release.yml`, no npm token); it goes public only after a maintainer approves it with 2FA. Pre-releases, and versions below the current `latest`, are staged under `next`. Pull requests run the installer and Codex tests.
 - Codex: the threshold check now counts the reasoning from before the newest instruction (a prompt, or a message sent while a task runs) since the last compaction, at 4 bytes of encrypted content a token. Codex 0.163 counts that reasoning toward `model_auto_compact_token_limit`, but the API no longer bills it, so the billed tokens alone ran 4–22% under Codex's figure and the handoff was never asked for: session `01a16a09` auto-compacted at 477,489 billed tokens (82% of 580,000) while Codex counted 583,096. Replayed on that session, the request now comes about 10 minutes before the compaction. The estimate runs high, so the request can come early but not late. The rollout is now read from its newest `compacted` record rather than its last 3 MB.
 
 ## 0.2.0
