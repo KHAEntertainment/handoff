@@ -109,7 +109,7 @@ Follow these in order. The tag must point at the commit that holds the new versi
 3. Tag the merged commit on `main` and push the tag: `git tag v<version>` then `git push origin v<version>`.
 4. Watch the `release` workflow in GitHub Actions. Fix any failure before approving anything.
 5. Approve the staged version with 2FA (see above).
-6. Create the GitHub release, then bump the `handoff` pin in [kha-marketplace](https://github.com/KHAEntertainment/marketplace).
+6. Create the GitHub release, then open one PR in [kha-marketplace](https://github.com/KHAEntertainment/marketplace) that bumps the `handoff` pin (`source.ref` in `.claude-plugin/marketplace.json`) and brings handoff's entry in its `README.md` up to date with this release: summary, install command and "After install" line, with no current or pinned version. Its `AGENTS.md` and the README's "Updating a plugin" section have the rule.
 
 Do not push a `v*` tag unless the user has asked for that release. A tag push starts a publish. The staging queue and 2FA approval protect against an accidental public release, but they do not stop the staging.
 
