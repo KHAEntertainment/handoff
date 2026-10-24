@@ -110,8 +110,8 @@ CONTEXT_MARKERS = (
     ('<turn_aborted>', '</turn_aborted>'),
     ('<subagent_notification>', '</subagent_notification>'),
     ('<agent_message_board_notification>', '</agent_message_board_notification>'),
-    ('<codex_internal_context', '</codex_internal_context>'),
-    ('<goal_context>', '</goal_context>'),
+    # <codex_internal_context source="..."> and <goal_context> have stricter matchers of their own
+    # (internal_model_context.rs), so they are left out: as boundaries they can only overcount.
 )
 
 

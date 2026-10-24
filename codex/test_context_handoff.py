@@ -216,6 +216,7 @@ class Hook(unittest.TestCase):
         # Real instructions can start with a tag: a Traycer resume prompt, or steering wrapped in XML.
         for text in ('<task>use the other file</task>',
                      '# AGENTS.md instructions are out of date, fix them first',
+                     '<codex_internal_context>use the other file</codex_internal_context>',
                      '<previous_session_context>\nnotes\n</previous_session_context>\n<current_user_query>go</current_user_query>'):
             with self.subTest(text=text[:20]):
                 self.tearDown(); self.setUp()
