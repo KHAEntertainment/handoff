@@ -100,4 +100,5 @@ jobs:
             tag=next
           fi
           echo "staging $version under dist-tag $tag (latest on npm: ${latest:-none})"
-          npm stage publish --access public --tag "$tag"
+          # npm logs why a trusted-publishing token exchange failed only at verbose level.
+          npm stage publish --access public --tag "$tag" --loglevel verbose
