@@ -25,7 +25,7 @@ Run `npm ci` first. It installs `@clack/prompts`, which the installer needs.
 claude plugin validate .                          # manifest and layout
 claude plugin test .                              # 44 tests, hooks/register.test.ts
 node --test cli/installer.test.js                 # 45 tests, runs the real CLI in a throwaway HOME
-python3 -m unittest codex/test_context_handoff.py # 20 tests
+python3 -m unittest codex/test_context_handoff.py # 27 tests
 ```
 
 Run all four before you open a PR. The installer tests use fake `claude`, `codex` and `opencode` binaries on `PATH`. They never touch the real `~/.claude`, `~/.codex` or `~/.config/opencode`, so keep it that way.
