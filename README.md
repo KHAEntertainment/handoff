@@ -1,4 +1,4 @@
-# handoff
+[![Handoff](https://ascii.rest/banner/Handoff.svg?color=d6692e,486af4&font=tall&shadow=heavy&size=l)](https://ascii.rest/banner/)
 
 Makes the agent write itself a resume note before its context is compacted, compacts, then points it back at the note. Built for Claude Code; ports for Codex and OpenCode.
 
