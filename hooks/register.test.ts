@@ -688,3 +688,300 @@ test('a marker with no origin is not the mod\'s own while no fallback of its is 
   expect(held.text).toMatch(/Compaction postponed/)
   expect(s.ran).toHaveLength(0)
 })
+
+const IDLE_MS = 45 * 60 * 1000
+const idleSession = (on: On, options: { interactive?: boolean; tokens?: number; autoEnabled?: boolean; settings?: Record<string, unknown>; env?: Record<string, string>; settingsWait?: () => Promise<void>; finishWait?: () => Promise<void> } = {}) => {
+  mock.env(on, { HOME: '/h', ...options.env })
+  const clock = mock.clock(on, { now: 5000 })
+  const state = { tokens: options.tokens ?? 250_000, onDisk: false, refuse: false, prompts: [] as string[], compactions: [] as string[] }
+  on('session.id', () => ({ value: 'idle-session' }))
+  on('session.start', () => ({ cwd: '/work' }))
+  on('session.end', () => ({ sessionId: 'idle-session' }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', async () => {
+    await options.finishWait?.()
+    return { text: '' }
+  })
+  on('settings.read', async () => {
+    await options.settingsWait?.()
+    return { value: options.settings ?? {} }
+  })
+  on('session.usage', (_, e) => ({ value: { startedAt: 0, context: { tokens: state.tokens, window: 1_000_000, percent: Math.round(state.tokens / 10_000), ...(e.breakdown === undefined ? {} : { breakdown: { rawMaxTokens: 1_000_000, isAutoCompactEnabled: options.autoEnabled !== false } }) }, rateLimits: [] } }))
+  on('fs.write', () => ({ value: undefined }))
+  on('fs.stat', () => state.onDisk ? { value: { kind: 'file' as const, size: 4000, mtimeMs: clock.now(), isLink: false } } : { deny: 'ENOENT' })
+  on('ui.log', () => ({ value: undefined }))
+  on('tool.call', () => ({ result: 'ok' }))
+  on('prompt.submit', (_, e) => {
+    if (state.refuse) return { drop: 'the session was stopped and nobody has sent input since' }
+    state.prompts.push(e.text)
+    return { text: e.text }
+  })
+  on('session.compact', (_, e) => {
+    state.compactions.push(e.instructions ?? '')
+    state.tokens = 50_000
+    return { messages: [{ role: 'user' as const, text: 'summary', toolUses: [] }] }
+  })
+  return {
+    clock,
+    state,
+    start: ($: any) => $.session.start({ surface: 'terminal', isInteractive: options.interactive !== false, cwd: '/work' }),
+    finish: ($: any, extra = {}) => $.turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 'idle-turn', reason: 'answer', ...extra }),
+  }
+}
+
+test('idle below the fill threshold: asks once, waits for the handoff, then compacts and resumes', async ($, on) => {
+  const { clock, state, start, finish } = idleSession(on)
+  await start($)
+  await finish($)
+  await clock.advance(IDLE_MS - 1)
+  expect(state.prompts).toHaveLength(0)
+  await clock.advance(1)
+  expect(state.prompts).toHaveLength(1)
+  expect(state.prompts[0]).toMatch(/idle for 45 minutes/)
+  expect(state.prompts[0]).toMatch(/\/h\/\.claude\/handoffs\/idle-session\.md/)
+  expect(state.prompts[0]).not.toMatch(/The user asked/)
+  expect(state.compactions).toHaveLength(0)
+  state.onDisk = true
+  await finish($)
+  await clock.advance(800)
+  expect(state.compactions).toHaveLength(1)
+  expect(state.compactions[0]).toMatch(/resume handoff was just written/)
+  expect(state.prompts[1]).toMatch(/Read your handoff/)
+  await clock.advance(IDLE_MS)
+  expect(state.compactions).toHaveLength(1)
+})
+
+test('a new prompt cancels the idle deadline and the next completed turn starts a fresh one', async ($, on) => {
+  const { clock, state, start, finish } = idleSession(on)
+  await start($)
+  await finish($)
+  await clock.advance(IDLE_MS - 1000)
+  await $.prompt.submit({ text: 'continue' })
+  await clock.advance(2000)
+  expect(state.prompts).toEqual(['continue'])
+  await finish($)
+  await clock.advance(IDLE_MS)
+  expect(state.prompts).toHaveLength(2)
+  expect(state.prompts[1]).toMatch(/idle for/)
+})
+
+test('a running main turn cancels the idle deadline', async ($, on) => {
+  const { clock, state, start, finish } = idleSession(on)
+  await start($)
+  await finish($)
+  await $.turn.start({ turnId: 'working' })
+  await clock.advance(IDLE_MS)
+  expect(state.prompts).toHaveLength(0)
+  await finish($)
+  await clock.advance(IDLE_MS)
+  expect(state.prompts).toHaveLength(1)
+})
+
+test('main tool activity cancels an idle deadline', async ($, on) => {
+  const { clock, state, start, finish } = idleSession(on)
+  await start($)
+  await finish($)
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  await clock.advance(IDLE_MS)
+  expect(state.prompts).toHaveLength(0)
+})
+
+test('subagent turns do not change the main session idle deadline', async ($, on) => {
+  const { clock, state, start, finish } = idleSession(on)
+  await start($)
+  await finish($)
+  await clock.advance(IDLE_MS - 1000)
+  await $.turn.start({ turnId: 'child', agentId: 'child' })
+  await finish($, { agentId: 'child' })
+  await clock.advance(1000)
+  expect(state.prompts).toHaveLength(1)
+})
+
+test('an interrupted turn never arms an idle handoff', async ($, on) => {
+  const { clock, state, start, finish } = idleSession(on)
+  await start($)
+  await finish($)
+  await finish($, { isAborted: true })
+  await clock.advance(IDLE_MS)
+  expect(state.prompts).toHaveLength(0)
+})
+
+test('ending a session cancels its idle deadline', async ($, on) => {
+  const { clock, state, start, finish } = idleSession(on)
+  await start($)
+  await finish($)
+  await $.session.end({ reason: 'resume' })
+  await clock.advance(IDLE_MS)
+  expect(state.prompts).toHaveLength(0)
+})
+
+test('headless sessions do not start idle handoff turns', async ($, on) => {
+  const { clock, state, start, finish } = idleSession(on, { interactive: false })
+  await start($)
+  await finish($)
+  await clock.advance(IDLE_MS)
+  expect(state.prompts).toHaveLength(0)
+})
+
+test('idle handoffs respect the host idleCompaction setting', async ($, on) => {
+  const settings = { idleCompaction: true }
+  const { clock, state, start, finish } = idleSession(on, { settings })
+  await start($)
+  await finish($)
+  settings.idleCompaction = false
+  await clock.advance(IDLE_MS)
+  expect(state.prompts).toHaveLength(0)
+})
+
+test('idle handoffs respect disabled host automatic compaction', async ($, on) => {
+  // Deliberately no setting: /config saves this preference in global config.
+  const { clock, state, start, finish } = idleSession(on, { autoEnabled: false })
+  await start($)
+  await finish($)
+  await clock.advance(IDLE_MS)
+  expect(state.prompts).toHaveLength(0)
+})
+
+test('idle handoffs respect DISABLE_AUTO_COMPACT', async ($, on) => {
+  const { clock, state, start, finish } = idleSession(on, { autoEnabled: false, env: { DISABLE_AUTO_COMPACT: 'on' } })
+  await start($)
+  await finish($)
+  await clock.advance(IDLE_MS)
+  expect(state.prompts).toHaveLength(0)
+})
+
+test('small idle sessions are left alone', async ($, on) => {
+  const { clock, state, start, finish } = idleSession(on, { tokens: 199_999 })
+  await start($)
+  await finish($)
+  await clock.advance(IDLE_MS)
+  expect(state.prompts).toHaveLength(0)
+})
+
+test('idle handoffs honor the native minimum token override', async ($, on) => {
+  const { clock, state, start, finish } = idleSession(on, { tokens: 150_000, env: { CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS: '100000' } })
+  await start($)
+  await finish($)
+  await clock.advance(IDLE_MS)
+  expect(state.prompts).toHaveLength(1)
+})
+
+test('idle handoffs respect manual compaction mode', { options: { autoCompact: false } }, async ($, on) => {
+  const { clock, state, start, finish } = idleSession(on)
+  await start($)
+  await finish($)
+  await clock.advance(IDLE_MS)
+  expect(state.prompts).toHaveLength(0)
+})
+
+test('idleHandoffMinutes zero disables proactive idle handoffs', { options: { idleHandoffMinutes: 0 } }, async ($, on) => {
+  const { clock, state, start, finish } = idleSession(on)
+  await start($)
+  await finish($)
+  await clock.advance(IDLE_MS)
+  expect(state.prompts).toHaveLength(0)
+})
+
+test('the idle delay is configurable', { options: { idleHandoffMinutes: 1 } }, async ($, on) => {
+  const { clock, state, start, finish } = idleSession(on)
+  await start($)
+  await finish($)
+  await clock.advance(60_000)
+  expect(state.prompts[0]).toMatch(/idle for 1 minutes/)
+})
+
+test('a refused idle prompt leaves normal threshold checks usable', async ($, on) => {
+  const { clock, state, start, finish } = idleSession(on)
+  await start($)
+  await finish($)
+  state.refuse = true
+  await clock.advance(IDLE_MS)
+  expect(state.prompts).toHaveLength(0)
+  state.tokens = 850_000
+  const ran = await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(ran.context?.[0]).toMatch(/85% full/)
+})
+
+test('a prompt arriving during the idle eligibility check cancels the pending handoff', async ($, on) => {
+  let release!: () => void
+  let entered!: () => void
+  const waiting = new Promise<void>(resolve => { release = resolve })
+  const checking = new Promise<void>(resolve => { entered = resolve })
+  const { clock, state, start, finish } = idleSession(on, { settingsWait: async () => { entered(); await waiting } })
+  await start($)
+  await finish($)
+  const advancing = clock.advance(IDLE_MS)
+  await checking
+  await $.prompt.submit({ text: 'new work' })
+  release()
+  await advancing
+  expect(state.prompts).toEqual(['new work'])
+  const ran = await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(ran.context).toBeUndefined()
+})
+
+test('the idle delay cannot be set later than the 45-minute safety margin', { options: { idleHandoffMinutes: 90 } }, async ($, on) => {
+  const { clock, state, start, finish } = idleSession(on)
+  await start($)
+  await finish($)
+  await clock.advance(IDLE_MS)
+  expect(state.prompts[0]).toMatch(/idle for 45 minutes/)
+})
+
+test('idle handoff compacts and resumes when an outer guard skips session.compact', {
+  plugins: [{
+    name: 'compact-guard',
+    tier: 'prepend',
+    register(on) {
+      on('session.compact', async ($, e, next) => next.to(e, 'append'))
+    },
+  }],
+}, async ($, on) => {
+  const { clock, state, start, finish } = idleSession(on)
+  await start($)
+  await finish($)
+  await clock.advance(IDLE_MS)
+  expect(state.prompts[0]).toMatch(/idle for/)
+  state.onDisk = true
+  await finish($)
+  await clock.advance(800)
+  expect(state.compactions).toHaveLength(1)
+  expect(state.prompts[1]).toMatch(/Read your handoff/)
+})
+
+test('a sleep-delayed idle callback is discarded', {
+  plugins: [{
+    name: 'late-wall-clock',
+    register(on) {
+      on('clock.now', async ($, e, next) => {
+        const result = await next(e)
+        return { value: result.value + (result.value >= 45 * 60 * 1000 ? 3 * 60 * 1000 : 0) }
+      })
+    },
+  }],
+}, async ($, on) => {
+  const { clock, state, start, finish } = idleSession(on)
+  await start($)
+  await finish($)
+  await clock.advance(IDLE_MS)
+  expect(state.prompts).toHaveLength(0)
+})
+
+test('activity during turn.complete does not suppress the existing threshold compaction flow', async ($, on) => {
+  let release!: () => void
+  let entered!: () => void
+  const waiting = new Promise<void>(resolve => { release = resolve })
+  const checking = new Promise<void>(resolve => { entered = resolve })
+  const { clock, state, start, finish } = idleSession(on, { tokens: 850_000, finishWait: async () => { entered(); await waiting } })
+  await start($)
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  state.onDisk = true
+  const finishing = finish($)
+  await checking
+  await $.prompt.submit({ text: 'new work' })
+  release()
+  await finishing
+  await clock.advance(800)
+  expect(state.compactions).toHaveLength(1)
+  expect(state.prompts.some(text => text.startsWith('The context was compacted.'))).toBe(true)
+})

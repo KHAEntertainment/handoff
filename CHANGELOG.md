@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Claude Code: large interactive sessions now request a handoff after 45 idle minutes, before native idle compaction can bypass the `session.compact` hook. The cancellable timer reuses the handoff/compact/resume flow, respects compaction settings and the native minimum-token override, and skips headless sessions, interrupted turns and sleep-delayed callbacks. `idleHandoffMinutes` adjusts the delay (maximum 45); `0` disables it. This proactive timer can start a model turn while you are away and does not inspect prompt-cache TTL; it cannot veto a native compaction that gets there first.
+
 ## 0.2.1
 
 - Release: a pushed `v*` tag now tests the package and stages it on npm through trusted publishing (`.github/workflows/release.yml`, no npm token); it goes public only after a maintainer approves it with 2FA. Pre-releases, and versions below the current `latest`, are staged under `next`. Pull requests run the installer and Codex tests.

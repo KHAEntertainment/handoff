@@ -23,7 +23,7 @@ Run `npm ci` first. It installs `@clack/prompts`, which the installer needs.
 
 ```
 claude plugin validate .                          # manifest and layout
-claude plugin test .                              # 44 tests, hooks/register.test.ts
+claude plugin test .                              # 66 tests, hooks/register.test.ts
 node --test cli/installer.test.js                 # 45 tests, runs the real CLI in a throwaway HOME
 python3 -m unittest codex/test_context_handoff.py # 27 tests
 ```
@@ -32,7 +32,7 @@ Run all four before you open a PR. The installer tests use fake `claude`, `codex
 
 CI (`.github/workflows/release.yml`, job `test`) runs only the installer tests and the Codex tests, on Ubuntu with Node 24 and Python 3.12. It does not run `claude plugin validate` or `claude plugin test`, so those two are your job before the PR.
 
-If you change the number of tests in `hooks/register.test.ts`, update the `44` in the README's Development section.
+If you change the number of tests in `hooks/register.test.ts`, update the test counts here and in the README's Development section.
 
 ## Claude Code hook: invariants
 

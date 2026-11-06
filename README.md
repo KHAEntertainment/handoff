@@ -47,11 +47,12 @@ Load one copy only. If you ran the mod before it was a plugin (a `~/.claude/mods
 
 ## Use
 
-Nothing to do. It watches the context fill and acts at the threshold (80% by default), or when you type `/compact`.
+Nothing to do. It watches the context fill and acts at the threshold (80% by default), when you type `/compact`, or before a large interactive Claude session has been idle for 45 minutes.
 
 | You type | What happens |
 |---|---|
 | nothing, context reaches the threshold | The agent is asked for a handoff, writes it, ends its turn with `Handoff written.`, the session compacts, and the agent is told to read the handoff and continue. |
+| nothing, a large Claude session stays idle | After 45 minutes, the agent is asked for a handoff, then follows the same compact/resume flow. See the eligibility and timing limits below. |
 | `/compact` | Same flow. The command is held ("skipped") while the handoff is written, then the compaction runs by itself. |
 | `/compact now` | Compacts at once, no handoff. Text after `now` is kept as compaction instructions. |
 | `/compact <instructions>` | Handoff first, with your instructions passed on to the handoff request. |
@@ -62,6 +63,14 @@ Since Claude Code 2.1.301 the built-in `cc-plugin-sec-default` hands `session.co
 
 With `autoCompact` off the text says to type `/compact` again once the handoff is ready, since nothing compacts by itself.
 
+### Idle compaction in Claude Code
+
+Claude Code can compact while idle even below the handoff fill threshold. That path does not run `/compact`, and the built-in security default can skip the plugin's `session.compact` hook. The plugin therefore requests a handoff proactively, after 45 minutes without primary-session activity, rather than trying to stop that compaction afterwards.
+
+The timer runs in interactive sessions only, with the plugin's `autoCompact` on, Claude's `idleCompaction` setting not off, and automatic compaction enabled for the session as Claude reports it (so `/config` and `DISABLE_AUTO_COMPACT` both count). It requires at least 200,000 context tokens and honors `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS` (minimum 100,000). A new prompt, primary turn, tool call, compaction, or session end cancels the deadline. Interrupted turns do not arm it. A callback delayed more than two minutes, for example by sleep, is discarded.
+
+This starts a model turn while you are away. It is an early fallback, not a veto on native compaction: it cannot guarantee a handoff if Claude compacts first, the machine sleeps past the deadline, or the handoff turn is refused or cannot finish. Your tool permissions still apply; a handoff-file approval can leave the turn waiting for you. Unlike the native idle trigger, it does not inspect prompt-cache TTL, so it may also request a handoff after a shorter cache has expired. Set `idleHandoffMinutes` to `0` to disable it. Your Claude settings are never rewritten.
+
 ## Settings
 
 Set through the plugin's options (`/plugin`, or `claude plugin configure handoff`).
@@ -70,6 +79,7 @@ Set through the plugin's options (`/plugin`, or `claude plugin configure handoff
 |---|---|---|
 | `thresholdPercent` | 80 | How full the window gets before the handoff is requested. Measured against the compaction window when that is smaller than the model's. |
 | `autoCompact` | true | Compact and resume on your behalf. Off: the agent tells you the handoff is ready and you compact. |
+| `idleHandoffMinutes` | 45 | Claude only: request a handoff after this many idle minutes in an eligible interactive session. `0` disables it; values above `45` are capped to leave time before native idle compaction. |
 
 ## How it works
 
@@ -120,7 +130,7 @@ The installer above sets these up. By hand:
 
 ```
 claude plugin validate .
-claude plugin test .      # 44 tests in hooks/register.test.ts
+claude plugin test .      # 66 tests in hooks/register.test.ts
 python3 -m unittest codex/test_context_handoff.py
 node --test cli/installer.test.js
 ```
