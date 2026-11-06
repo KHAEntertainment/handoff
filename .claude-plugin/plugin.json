@@ -19,6 +19,12 @@
       "title": "Compact and resume automatically",
       "description": "Once the handoff is written and the turn ends, compact and send a resume prompt. Off: the agent tells you and you compact.",
       "default": true
+    },
+    "idleHandoffMinutes": {
+      "type": "number",
+      "title": "Idle handoff delay (minutes)",
+      "description": "Ask for a handoff after this many idle minutes in interactive sessions with at least 200,000 context tokens (or the host's idle minimum). Requires autoCompact and Claude's own automatic and idle compaction to be enabled. Default and maximum: 45; 0 disables idle handoffs.",
+      "default": 45
     }
   }
 }

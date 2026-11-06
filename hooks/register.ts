@@ -14,6 +14,12 @@ const OWN_COMPACT = 'A resume handoff was just written to'
 
 let threshold = 80
 let isAuto = true
+let idleMinutes = 45
+let isInteractive = false
+let turnActive = false
+let idleGeneration = 0
+let idleTimer: { cancel: () => void } | undefined
+const IDLE_LATE_MS = 2 * 60 * 1000
 
 let phase: Phase = 'armed'
 let nudgedAt = 0
@@ -37,6 +43,54 @@ let lastCompactAt = 0
 const RECENT_COMPACT_MS = 15 * 60 * 1000
 const MAX_LOGGED = 50
 const compactLog: unknown[] = []
+
+function cancelIdle() {
+  idleGeneration += 1
+  idleTimer?.cancel()
+  idleTimer = undefined
+}
+
+async function requestIdle($: EngineInterface, generation: number, dueAt: number) {
+  if (generation !== idleGeneration || turnActive || isCompacting || (phase !== 'armed' && phase !== 'cooling')) return
+  idleTimer = undefined
+  const [settings, rawMinimum, usage] = await Promise.all([
+    $.settings.read(),
+    $.env.get('CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS'),
+    $.session.usage({ breakdown: 'summary' }),
+  ])
+  // /config's automatic-compaction toggle lives in global config, not settings files.
+  // The context breakdown reports the effective value, including environment overrides.
+  if (settings.idleCompaction === false || usage.context.breakdown?.isAutoCompactEnabled !== true) return
+  const parsedMinimum = Number(rawMinimum)
+  const minimum = Math.max(100_000, rawMinimum !== undefined && Number.isFinite(parsedMinimum) && parsedMinimum > 0 ? parsedMinimum : 200_000)
+  if (usage.context.tokens === undefined || usage.context.tokens < minimum) return
+  await locate($)
+  const now = await $.clock.now()
+  // A cancelled or sleep-delayed callback must not race a new turn or a native compaction.
+  if (generation !== idleGeneration || turnActive || isCompacting || now - dueAt > IDLE_LATE_MS || (phase !== 'armed' && phase !== 'cooling')) return
+  const before = phase
+  phase = 'nudged'
+  nudgedAt = now
+  stepsSinceNudge = 0
+  stepsSinceReady = 0
+  hasChased = false
+  try {
+    const sent = await $.prompt.submit({ text: ask(`This session has been idle for ${idleMinutes} minutes. Write a handoff before Claude Code's idle compaction can discard its working context.`) })
+    if (sent.drop === undefined) return
+  } catch {
+    // An interrupted/stopped session may refuse background prompts. Leave threshold checks usable.
+  }
+  if (phase === 'nudged' && nudgedAt === now) phase = before
+}
+
+async function armIdle($: EngineInterface) {
+  if (!isInteractive || !isAuto || turnActive || idleMinutes === 0 || (phase !== 'armed' && phase !== 'cooling')) return
+  const generation = idleGeneration
+  const delay = idleMinutes * 60 * 1000
+  const dueAt = (await $.clock.now()) + delay
+  if (generation !== idleGeneration) return
+  idleTimer = $.clock.after(delay, () => requestIdle($, generation, dueAt).catch(() => undefined))
+}
 
 async function fill($: EngineInterface) {
   const { context } = await $.session.usage()
@@ -337,16 +391,34 @@ async function compactTyped($: EngineInterface, run: () => Promise<CommandRunRes
 export const register: Register = (on, options) => {
   threshold = typeof options.thresholdPercent === 'number' ? options.thresholdPercent : 80
   isAuto = options.autoCompact !== false
+  idleMinutes = typeof options.idleHandoffMinutes === 'number' && Number.isFinite(options.idleHandoffMinutes)
+    ? Math.min(45, Math.max(0, options.idleHandoffMinutes))
+    : 45
 
   // One small file naming the last session that loaded the mod: the only sign outside the debug log.
   on('session.start', async ($, e, next) => {
+    isInteractive = e.isInteractive === true
     const home = (await $.env.get('HOME')) ?? '~'
     const loaded = { session: await $.session.id(), agent: await $.env.get('TRAYCER_AGENT_ID'), at: await $.clock.now(), threshold, isAuto }
     await $.fs.write(`${home}/.claude/handoffs/.last-loaded.json`, JSON.stringify(loaded)).catch(() => undefined)
     return next(e)
   })
 
+  on('session.end', async ($, e, next) => {
+    cancelIdle()
+    return next(e)
+  })
+
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) {
+      turnActive = true
+      cancelIdle()
+    }
+    return next(e)
+  })
+
   on('tool.call', async ($, e, next) => {
+    if (e.agentId === undefined) cancelIdle()
     const ran = await next(e)
     if (e.agentId !== undefined || ran.deny !== undefined) return ran
     const note = await afterStep($).catch(() => undefined)
@@ -354,13 +426,22 @@ export const register: Register = (on, options) => {
   })
 
   on('prompt.submit', async ($, e, next) => {
+    cancelIdle()
     const note = await check($).catch(() => undefined)
     return note === undefined ? next(e) : next({ ...e, context: [...(e.context ?? []), note] })
   })
 
   on('turn.complete', async ($, e, next) => {
+    const generation = idleGeneration
     const done = await next(e)
-    if (e.agentId !== undefined || e.reason !== 'answer') return done
+    if (e.agentId !== undefined) return done
+    const unchanged = generation === idleGeneration
+    if (unchanged) {
+      turnActive = false
+      cancelIdle()
+    }
+    const endedGeneration = idleGeneration
+    if (e.reason !== 'answer' || e.isAborted) return done
     if (phase === 'nudged' && (await isWritten($))) phase = 'ready'
     if (phase === 'ready' && isAuto) $.clock.after(750, () => void compactAndResume($, 1))
     // The turn ended with the handoff still missing: ask once more, as a prompt of its own.
@@ -369,12 +450,14 @@ export const register: Register = (on, options) => {
       const text = `The resume handoff asked for earlier is still missing. Write it now at ${handoff}, following the outline you were given, then end your turn with the single line "Handoff written." The session is compacted and resumed automatically after that.`
       $.clock.after(750, () => void $.prompt.submit({ text }))
     }
+    if (unchanged && endedGeneration === idleGeneration) await armIdle($)
     return done
   })
 
   // A typed /compact. Since Claude Code 2.1.301 the built-in cc-plugin-sec-default hands session.compact past
   // user plugins, so this is where the command is held; session.compact below covers the rest where it still fires.
   on('command.run', { command: 'compact' }, async ($, e, next) => {
+    cancelIdle()
     const typed = e.args.trim()
     // A build that leaves origin out fails open: the command is treated as from an unknown source.
     const origin: string | undefined = e.origin?.kind
@@ -412,6 +495,7 @@ export const register: Register = (on, options) => {
   // Any compaction this mod did not start: the threshold's, or a typed /compact.
   on('session.compact', async ($, e, next) => {
     if (e.agentId !== undefined || e.trigger === 'precompute') return next(e)
+    cancelIdle()
     if (isRouted) {
       await logCompact($, e, 'routed')
       const done = await next(e)
